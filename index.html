@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>登攀 - 3D登山</title>
+  </head>
+  <body>
+    <canvas id="app"></canvas>
+
+    <!-- 画面中央のレティクル (ホールド選択カーソル) -->
+    <div id="reticle"><span></span></div>
+
+    <div id="hud" class="hidden">
+      <!-- 左上: 身体 -->
+      <section class="panel" id="body-panel">
+        <div class="row">
+          <span class="label">状態</span><span id="action" class="badge">歩行</span>
+        </div>
+        <div class="row"><span class="label">スタミナ</span><span id="stamina-text" class="value">100 / 100</span></div>
+        <div class="bar max"><div id="max-bar" class="bar-fill max-fill"></div></div>
+        <div class="bar"><div id="stamina-bar" class="bar-fill"></div></div>
+        <div class="row sub">
+          <span id="env-alt">標高 0m</span><span id="env-temp">14.0℃</span>
+        </div>
+        <div class="row sub"><span id="rope-count">ロープ 0</span><span id="snow-state"></span></div>
+      </section>
+
+      <!-- 右上: 山 -->
+      <section class="panel" id="mountain-panel">
+        <div id="mtn-name" class="mtn-name">未踏峰</div>
+        <div class="row sub"><span id="mtn-id">-</span><span id="mtn-diff">-</span></div>
+        <div class="row"><span class="label">山頂まで</span><span id="mtn-remain" class="value">-</span></div>
+        <div class="bar climbbar"><div id="progress-bar" class="bar-fill progress-fill"></div></div>
+        <div id="mtn-rock" class="row sub"></div>
+        <div id="party" class="party"></div>
+      </section>
+
+      <!-- 左中: ルート組み立て -->
+      <section class="panel hidden" id="plan-panel">
+        <div class="panel-title">ルート</div>
+        <div class="row"><span class="label">手数</span><span id="plan-steps" class="value">0</span></div>
+        <div class="row"><span class="label">総消費</span><span id="plan-cost" class="value">0</span></div>
+        <div class="row"><span class="label">登り切った時</span><span id="plan-end" class="value">-</span></div>
+        <div class="row sub"><span id="plan-ending">終点を決める</span><span id="plan-rope"></span></div>
+        <div id="plan-warn" class="plan-warn"></div>
+        <ul class="keys plan-keys">
+          <li><kbd>クリック</kbd> 手を足す ／ <kbd>右クリック</kbd> 1手戻す</li>
+          <li><kbd>Shift</kbd> ロープを使う ／ <kbd>Space</kbd> 登る</li>
+          <li><kbd>S</kbd> やめて壁から離れる ／ <kbd>ドラッグ</kbd> 視点</li>
+        </ul>
+      </section>
+
+      <!-- 中央下: 文脈ヒント -->
+      <div id="hint" class="hint"></div>
+      <!-- レティクル情報 -->
+      <div id="aim" class="aim"></div>
+      <div id="toast" class="toast"></div>
+    </div>
+
+    <!-- ローディング -->
+    <div id="loading" class="overlay hidden">
+      <div class="loading-box">
+        <div class="loading-title" id="loading-title">山を生成中</div>
+        <div class="bar"><div id="loading-bar" class="bar-fill"></div></div>
+      </div>
+    </div>
+
+    <!-- タイトル / 山選択 -->
+    <div id="title" class="overlay">
+      <div class="title-box">
+        <h1>登攀<small>TOZANBU</small></h1>
+        <p class="tagline">ランダム生成された山に登る。未踏峰を最初に登った者に命名権がある。</p>
+
+        <div class="form-grid">
+          <label for="player-name">登山者名</label>
+          <input id="player-name" maxlength="16" placeholder="名前" />
+
+          <label for="seed-input">Seed</label>
+          <div class="seed-row">
+            <input id="seed-input" inputmode="numeric" placeholder="12345" />
+            <button id="seed-random" type="button">ランダム</button>
+          </div>
+
+          <label>難易度</label>
+          <div id="difficulty-row" class="diff-row"></div>
+
+          <label for="room-input">ルーム</label>
+          <div class="seed-row">
+            <input id="room-input" maxlength="24" placeholder="空欄でソロ (1人パーティー)" />
+          </div>
+        </div>
+
+        <div class="mtn-preview">
+          <span id="preview-id">M0000000-3</span>
+          <span id="preview-state">未踏峰</span>
+        </div>
+
+        <button id="start-btn" class="primary" type="button">この山に登る</button>
+
+        <div class="records">
+          <div class="records-title">記録された山</div>
+          <div id="records-list" class="records-list">読み込み中…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 登頂 -->
+    <div id="summit" class="overlay hidden">
+      <div class="summit-box">
+        <div class="summit-kicker" id="summit-kicker">SUMMIT</div>
+        <h2 id="summit-title">登頂</h2>
+        <div id="summit-stats" class="summit-stats"></div>
+        <div id="naming" class="naming hidden">
+          <label for="mountain-name">この山に名前をつける</label>
+          <input id="mountain-name" maxlength="20" placeholder="山名" />
+          <button id="name-btn" class="primary" type="button">命名する</button>
+        </div>
+        <div id="summit-named" class="summit-named hidden"></div>
+        <button id="back-btn" type="button">タイトルへ</button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
