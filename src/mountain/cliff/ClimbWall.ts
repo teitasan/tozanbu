@@ -20,7 +20,16 @@ import { CLIMB, MOVE } from '../../core/types';
 import type { DifficultyProfile } from '../difficulty';
 import type { Heightfield } from '../Heightfield';
 import type { SurfaceMap } from '../SurfaceMap';
-import { CELL_SIZE, cellMoveCost, passable, type Cell, type CellGrade } from './grid';
+import {
+  AIM_DIRS,
+  aimBlocker,
+  aimNeighbours,
+  CELL_SIZE,
+  cellMoveCost,
+  passable,
+  type Cell,
+  type CellGrade,
+} from './grid';
 import { reachableSet, solveRoute, type SolverResult } from './routeSolver';
 
 export interface WallFrame {
@@ -34,6 +43,17 @@ export interface WallFrame {
   height: number;
   halfWidth: number;
 }
+
+/** 線形 → sRGB のバイト値。テクスチャを焼くたびに pow を呼ばないための表 */
+const SRGB_BYTE = (() => {
+  const t = new Uint8Array(1024);
+  for (let i = 0; i < 1024; i++) {
+    const x = i / 1023;
+    const s = x <= 0.0031308 ? x * 12.92 : 1.055 * Math.pow(x, 1 / 2.4) - 0.055;
+    t[i] = Math.round(s * 255);
+  }
+  return t;
+})();
 
 /** 難易度を1段ずつ易しくする */
 const EASE: Record<CellGrade, CellGrade> = {
@@ -61,8 +81,8 @@ export class ClimbWall {
   readonly report: SolverResult;
   readonly repairs: number;
 
-  private readonly hoverMarker: THREE.Mesh;
-  private readonly routeMarkers: THREE.Mesh[] = [];
+  private readonly currentMarker: THREE.Mesh;
+  private readonly targetMarker: THREE.Mesh;
   private overlay: THREE.Mesh | null = null;
   /** 岩肌の「登りやすさ」の連続場。難易度もテクスチャもここから作る */
   private quality: (u: number, v: number) => number = () => 0;
@@ -76,7 +96,7 @@ export class ClimbWall {
     readonly frame: WallFrame,
     private readonly field: Heightfield,
     private readonly profile: DifficultyProfile,
-    surface: SurfaceMap,
+    private readonly surface: SurfaceMap,
     mountainId: string,
     maxStamina: number,
   ) {
@@ -96,10 +116,10 @@ export class ClimbWall {
     this.report = repair.report;
     this.repairs = repair.repairs;
 
-    this.buildSurfaceOverlay(surface.rockKind.color);
-    this.hoverMarker = this.buildMarker(0xffffff, 0.42);
-    this.hoverMarker.visible = false;
-    this.group.add(this.hoverMarker);
+    this.buildSurfaceOverlay();
+    this.currentMarker = this.buildMarker(0xffffff, 0.34);
+    this.targetMarker = this.buildMarker(0xffd24a, 0.44);
+    this.group.add(this.currentMarker, this.targetMarker);
   }
 
   // --- 壁面の座標 ---------------------------------------------------------
@@ -273,7 +293,7 @@ export class ClimbWall {
   private solve(maxStamina: number): SolverResult {
     return solveRoute({
       cells: this.cells,
-      reach: this.reach,
+      grid: this,
       distanceCost: CLIMB.distanceCost,
       maxStamina,
     });
@@ -332,19 +352,20 @@ export class ClimbWall {
   private bridgeGap(): boolean {
     const starts = this.cells.filter((c) => c.ground && passable(c));
     if (!starts.length) return false;
-    const reached = reachableSet(this.cells, this.reach, starts);
+    const reached = reachableSet(this, this.cells, CLIMB.distanceCost, starts);
     if ([...reached].some((c) => c.topOut)) return false; // 連結はしている
 
-    // 到達集合の縁から、上へ繋がる impossible セルを1つ開ける
+    // 到達集合の縁で、方向を塞いでいる平滑なセルを1つ開ける。
+    // 塞いでいるものだけを緩めるので、既にある繋がりは壊れない
     let bestCell: Cell | null = null;
     let bestScore = -Infinity;
     for (const from of reached) {
       if (!from.pos) continue;
-      for (const c of this.cells) {
-        if (reached.has(c) || !c.pos) continue;
-        if (from.pos.distanceTo(c.pos) > this.reach) continue;
+      for (const [sx, sy] of AIM_DIRS) {
+        const c = aimBlocker(this, from, sx, sy);
+        if (!c || reached.has(c) || !c.pos) continue;
         // 高いところへ抜けられるものを優先
-        const score = c.pos.y - from.pos.y + (c.grade === 'impossible' ? 0 : 1.5);
+        const score = c.pos.y - from.pos.y;
         if (score > bestScore) {
           bestScore = score;
           bestCell = c;
@@ -375,12 +396,10 @@ export class ClimbWall {
         goal = cur;
         break;
       }
-      for (const c of this.cells) {
-        if (prev.has(c) || !passable(c) || !cur.pos) continue;
-        if (cur.pos.distanceTo(c.pos!) <= this.reach) {
-          prev.set(c, cur);
-          queue.push(c);
-        }
+      for (const c of aimNeighbours(this, cur, CLIMB.distanceCost)) {
+        if (prev.has(c)) continue;
+        prev.set(c, cur);
+        queue.push(c);
       }
     }
     if (!goal) return false;
@@ -431,11 +450,6 @@ export class ClimbWall {
   }
 
   /**
-   * 難易度を岩肌の造形として置く。
-   * 色ではなく形で伝える (連続した岩壁に見えるように、色は岩質のまま)。
-   * セルごとの法線に合わせ、奥行きの半分を岩に埋めて生やす。
-   */
-  /**
    * 岩肌の見た目。
    *
    * 突起をジオメトリで生やすと壁から浮いて見えるので、
@@ -444,21 +458,24 @@ export class ClimbWall {
    * どちらも難易度を決めているのと同じ連続場から焼くので、
    * 見た目と難易度が一致し、セルの境目も見えない。
    */
-  private buildSurfaceOverlay(rockColor: THREE.Color): void {
+  private buildSurfaceOverlay(): void {
     const f = this.frame;
     // セル1つに頂点1つ。細かい凹凸はノーマルマップが持つので、
     // メッシュは壁の形に沿うだけでよい
-    const sub = 1;
-    const nx = this.cols * sub;
-    const ny = this.rows * sub;
+    const nx = this.cols;
+    const ny = this.rows;
     const vertCount = (nx + 1) * (ny + 1);
     const positions = new Float32Array(vertCount * 3);
     const normals = new Float32Array(vertCount * 3);
     const uvs = new Float32Array(vertCount * 2);
     const valid = new Uint8Array(vertCount);
+    // 周りの地形と同じ色。テクスチャの地の色にする
+    const base = new Float32Array(vertCount * 3);
 
     const p = new THREE.Vector3();
     const n = new THREE.Vector3();
+    const col = new THREE.Color();
+    const rock = this.surface.rockKind.color;
     for (let j = 0; j <= ny; j++) {
       for (let i = 0; i <= nx; i++) {
         const idx = j * (nx + 1) + i;
@@ -476,6 +493,16 @@ export class ClimbWall {
           normals[idx * 3 + 2] = n.z;
           valid[idx] = 1;
         }
+        // 立った面には雪が付かないので、地形の色より岩寄りにする
+        this.surface.colorAt(
+          found ? p.x : f.base.x,
+          found ? p.z : f.base.z,
+          col,
+        );
+        col.lerp(rock, 0.45).multiplyScalar(0.95);
+        base[idx * 3] = col.r;
+        base[idx * 3 + 1] = col.g;
+        base[idx * 3 + 2] = col.b;
         uvs[idx * 2] = i / nx;
         uvs[idx * 2 + 1] = j / ny;
       }
@@ -502,11 +529,11 @@ export class ClimbWall {
     geo.setIndex(index);
     geo.computeBoundingSphere();
 
-    const { color, normalMap } = this.bakeRockTexture(rockColor);
+    const { color, normalMap } = this.bakeRockTexture(base, nx + 1, ny + 1);
     const mat = new THREE.MeshStandardMaterial({
       map: color,
       normalMap,
-      normalScale: new THREE.Vector2(1.6, 1.6),
+      normalScale: new THREE.Vector2(0.9, 0.9),
       transparent: true,
       roughness: 1,
       metalness: 0,
@@ -530,28 +557,55 @@ export class ClimbWall {
    *   低い = 縦に走る細い溝だけ
    *   最低 = ほぼ平滑
    * となり、見ただけで難易度が読める。
+   *
+   * 地の色は周りの地形から取った base を敷く。
+   * 岩壁だけ色が違うと、貼り付けたタイルに見えてしまう。
    */
-  private bakeRockTexture(rockColor: THREE.Color): {
-    color: THREE.CanvasTexture;
-    normalMap: THREE.CanvasTexture;
-  } {
+  private bakeRockTexture(
+    base: Float32Array,
+    baseW: number,
+    baseH: number,
+  ): { color: THREE.CanvasTexture; normalMap: THREE.CanvasTexture } {
     const f = this.frame;
     // 1m あたりのピクセル。細部はノーマルマップの陰影で見せるので、
     // 解像度を上げるより焼き時間を抑えるほうが効く
-    const px = 4;
-    const w = Math.max(32, Math.min(128, Math.round(f.halfWidth * 2 * px)));
-    const h = Math.max(32, Math.min(128, Math.round(f.height * px)));
+    const px = 8;
+    const w = Math.max(64, Math.min(224, Math.round(f.halfWidth * 2 * px)));
+    const h = Math.max(64, Math.min(224, Math.round(f.height * px)));
 
     const relief = new Float32Array(w * h);
     const uAt = (i: number) => -f.halfWidth + ((i + 0.5) / w) * f.halfWidth * 2;
     const vAt = (j: number) => ((j + 0.5) / h) * f.height;
+
+    // quality は緩やかな場なので、粗く取って間を埋める (fbm は重い)
+    const qw = Math.ceil(w / 3) + 1;
+    const qh = Math.ceil(h / 3) + 1;
+    const qGrid = new Float32Array(qw * qh);
+    for (let j = 0; j < qh; j++) {
+      for (let i = 0; i < qw; i++) {
+        qGrid[j * qw + i] = this.quality(uAt(i * 3), vAt(j * 3));
+      }
+    }
+    const qAt = (i: number, j: number): number => {
+      const x = i / 3;
+      const y = j / 3;
+      const xi = Math.min(qw - 2, Math.floor(x));
+      const yi = Math.min(qh - 2, Math.floor(y));
+      const tx = x - xi;
+      const ty = y - yi;
+      const a = qGrid[yi * qw + xi];
+      const b = qGrid[yi * qw + xi + 1];
+      const c = qGrid[(yi + 1) * qw + xi];
+      const d = qGrid[(yi + 1) * qw + xi + 1];
+      return (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty;
+    };
 
     // 1) 起伏を作る
     for (let j = 0; j < h; j++) {
       for (let i = 0; i < w; i++) {
         const u = uAt(i);
         const v = vAt(j);
-        const q = this.quality(u, v);
+        const q = qAt(i, j);
         // 難易度帯ごとの重み (境目はなめらか)
         const wEasy = smoothstep(this.qMedium, this.qEasy, q);
         const wHard = 1 - smoothstep(this.qHard, this.qMedium, q);
@@ -562,36 +616,49 @@ export class ClimbWall {
         const grain = this.noise(u * 6.0 - 3.1, v * 6.0 + 5.2) * 0.5;
         const groove = Math.abs(this.noise(u * 7.0 + 21.0, v * 0.7));
 
-        let r = 0.5 + grain * 0.35;
-        r += wEasy * blob * 1.5;
-        r -= wHard * (1 - Math.min(1, groove * 5)) * 0.55;
+        let r = 0.5 + grain * 0.3;
+        r += wEasy * blob * 1.05;
+        r -= wHard * (1 - Math.min(1, groove * 5)) * 0.45;
         r = 0.5 + (r - 0.5) * (1 - wBlank * 0.85); // 平滑帯は起伏を潰す
         relief[j * w + i] = r;
       }
     }
 
-    // 2) カラー: 岩質の色に起伏ぶんの明暗だけ乗せる
+    // 2) カラー: 周りの地形の色に、起伏ぶんの明暗を乗せる
     const colorCanvas = document.createElement('canvas');
     colorCanvas.width = w;
     colorCanvas.height = h;
     const cctx = colorCanvas.getContext('2d')!;
     const cimg = cctx.createImageData(w, h);
-    const edge = 0.1; // 縁をなじませる幅 (0..0.5)
+    const edge = 0.16; // 縁をなじませる幅 (0..0.5)
+    const snow = new THREE.Color(0xdfe6ee);
+    const col = new THREE.Color();
     for (let j = 0; j < h; j++) {
       for (let i = 0; i < w; i++) {
         const k = j * w + i;
-        const r = relief[k];
-        const shade = 0.78 + clamp01(r) * 0.42;
         const fu = (i + 0.5) / w;
         const fv = (j + 0.5) / h;
+        const u = uAt(i);
+        const v = vAt(j);
+        this.sampleBase(base, baseW, baseH, fu, fv, col);
+        col.multiplyScalar(0.88 + clamp01(relief[k]) * 0.26);
+
+        // 岩棚には雪が残る。休める場所が見ただけで分かる。
+        // マス目に見えないよう、丸くぼかしてノイズで縁を崩す
+        const rest = this.restFieldAt(u, v);
+        if (rest > 0.01) col.lerp(snow, rest * 0.6);
+
+        // 縁は直線で切ると貼り付けたように見えるので、ノイズで揺らす
+        const wob = this.noise(u * 1.7 - 4.4, v * 1.7 + 9.1) * 0.1;
         const fade =
-          smoothstep(0, edge, fu) *
-          smoothstep(0, edge, 1 - fu) *
-          smoothstep(0, edge * 0.6, fv) *
-          smoothstep(0, edge * 0.6, 1 - fv);
-        cimg.data[k * 4] = clamp01(rockColor.r * shade) * 255;
-        cimg.data[k * 4 + 1] = clamp01(rockColor.g * shade) * 255;
-        cimg.data[k * 4 + 2] = clamp01(rockColor.b * shade) * 255;
+          smoothstep(0, edge, fu + wob) *
+          smoothstep(0, edge, 1 - fu + wob) *
+          smoothstep(0, edge * 0.5, fv + wob) *
+          smoothstep(0, edge * 0.5, 1 - fv + wob);
+        // 作業色は線形。書き出す前に sRGB へ直さないと二重に暗くなる
+        cimg.data[k * 4] = SRGB_BYTE[Math.round(clamp01(col.r) * 1023)];
+        cimg.data[k * 4 + 1] = SRGB_BYTE[Math.round(clamp01(col.g) * 1023)];
+        cimg.data[k * 4 + 2] = SRGB_BYTE[Math.round(clamp01(col.b) * 1023)];
         cimg.data[k * 4 + 3] = fade * 255;
       }
     }
@@ -630,49 +697,93 @@ export class ClimbWall {
     return { color, normalMap };
   }
 
+  /** 頂点ごとに取った地形色を、テクセル位置で線形に混ぜる */
+  private sampleBase(
+    base: Float32Array,
+    bw: number,
+    bh: number,
+    fu: number,
+    fv: number,
+    out: THREE.Color,
+  ): THREE.Color {
+    const x = Math.min(bw - 1.001, Math.max(0, fu * (bw - 1)));
+    const y = Math.min(bh - 1.001, Math.max(0, fv * (bh - 1)));
+    const i = Math.floor(x);
+    const j = Math.floor(y);
+    const tx = x - i;
+    const ty = y - j;
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    for (let dj = 0; dj <= 1; dj++) {
+      for (let di = 0; di <= 1; di++) {
+        const wgt = (di ? tx : 1 - tx) * (dj ? ty : 1 - ty);
+        const k = ((j + dj) * bw + (i + di)) * 3;
+        r += base[k] * wgt;
+        g += base[k + 1] * wgt;
+        b += base[k + 2] * wgt;
+      }
+    }
+    return out.setRGB(r, g, b);
+  }
+
+  /**
+   * その位置がどれくらい岩棚か (0..1)。
+   * セルの中心を中心に丸くぼかすので、マス目には見えない。
+   */
+  private restFieldAt(u: number, v: number): number {
+    const col = Math.floor((u + this.frame.halfWidth) / this.cellW);
+    const row = Math.floor(v / this.cellH);
+    let sum = 0;
+    for (let dr = -1; dr <= 1; dr++) {
+      for (let dc = -1; dc <= 1; dc++) {
+        const c = this.cellAt(col + dc, row + dr);
+        if (!c?.rest) continue;
+        const cu = -this.frame.halfWidth + (c.col + 0.5) * this.cellW;
+        const cv = (c.row + 0.5) * this.cellH;
+        const d2 = ((u - cu) / (this.cellW * 0.62)) ** 2 + ((v - cv) / (this.cellH * 0.5)) ** 2;
+        sum += Math.exp(-d2 * 2.2);
+      }
+    }
+    // ノイズで縁を崩し、雪の付き方を不揃いにする
+    return clamp01(sum * (0.75 + this.noise(u * 3.3 + 6.1, v * 3.3 - 2.4) * 0.5));
+  }
+
+
   private buildMarker(color: number, radius: number): THREE.Mesh {
     const m = new THREE.Mesh(
-      new THREE.TorusGeometry(radius, 0.045, 8, 22),
+      new THREE.TorusGeometry(radius, 0.05, 8, 24),
       new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95, depthTest: false }),
     );
     m.renderOrder = 5;
+    m.visible = false;
     return m;
   }
 
   /** マーカーをそのセルの壁面に貼り付ける */
-  private placeMarker(m: THREE.Mesh, cell: Cell): void {
+  private placeMarker(m: THREE.Mesh, cell: Cell | null): void {
+    if (!cell?.pos) {
+      m.visible = false;
+      return;
+    }
     m.visible = true;
-    m.position.copy(cell.pos!).addScaledVector(cell.normal, 0.1);
+    m.position.copy(cell.pos).addScaledVector(cell.normal, 0.12);
     this.orientationFor(cell.normal, m.quaternion);
   }
 
-  /** カーソルが指しているセルを示す */
-  setHover(cell: Cell | null): void {
-    if (!cell?.pos) {
-      this.hoverMarker.visible = false;
-      return;
-    }
-    this.placeMarker(this.hoverMarker, cell);
+  /** いま掴んでいるセル */
+  setCurrent(cell: Cell | null): void {
+    this.placeMarker(this.currentMarker, cell);
   }
 
-  /** 選んだルートを示す */
-  markRoute(cells: Cell[]): void {
-    while (this.routeMarkers.length < cells.length) {
-      const m = this.buildMarker(0xffd24a, 0.34);
-      this.group.add(m);
-      this.routeMarkers.push(m);
-    }
-    for (let i = 0; i < this.routeMarkers.length; i++) {
-      const m = this.routeMarkers[i];
-      const c = cells[i];
-      if (c?.pos) this.placeMarker(m, c);
-      else m.visible = false;
-    }
+  /** 方向キーで狙っているセル */
+  setTarget(cell: Cell | null): void {
+    this.placeMarker(this.targetMarker, cell);
   }
 
   clearMarkers(): void {
-    this.setHover(null);
-    for (const m of this.routeMarkers) m.visible = false;
+    this.currentMarker.visible = false;
+    this.targetMarker.visible = false;
   }
 
   // --- 問い合わせ ---------------------------------------------------------
@@ -703,7 +814,7 @@ export class ClimbWall {
       mat.normalMap?.dispose();
       mat.dispose();
     }
-    for (const m of [this.hoverMarker, ...this.routeMarkers]) {
+    for (const m of [this.currentMarker, this.targetMarker]) {
       m.geometry.dispose();
       (m.material as THREE.Material).dispose();
     }

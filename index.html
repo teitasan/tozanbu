@@ -37,24 +37,26 @@
       </section>
 
       <!-- 左中: ルート組み立て -->
-      <section class="panel hidden" id="plan-panel">
-        <div class="panel-title">ルート</div>
-        <div class="row"><span class="label">手数</span><span id="plan-steps" class="value">0</span></div>
-        <div class="row"><span class="label">総消費</span><span id="plan-cost" class="value">0</span></div>
-        <div class="row"><span class="label">登り切った時</span><span id="plan-end" class="value">-</span></div>
-        <div class="row sub"><span id="plan-ending">終点を決める</span><span id="plan-rope"></span></div>
-        <div id="plan-warn" class="plan-warn"></div>
-        <ul class="keys plan-keys">
-          <li><kbd>クリック</kbd> 手を足す ／ <kbd>右クリック</kbd> 1手戻す</li>
-          <li><kbd>Shift</kbd> ロープを使う ／ <kbd>Space</kbd> 登る</li>
-          <li><kbd>S</kbd> やめて壁から離れる ／ <kbd>ドラッグ</kbd> 視点</li>
+      <!-- 左中: 登攀 -->
+      <section class="panel hidden" id="climb-panel">
+        <div class="panel-title">登攀</div>
+        <div class="next-move">
+          <span id="climb-arrow" class="arrow">・</span>
+          <div class="next-body">
+            <div id="climb-grade" class="value">方向を選ぶ</div>
+            <div id="climb-cost" class="sub">WASD で方向 ／ Space で1手</div>
+          </div>
+        </div>
+        <div id="climb-note" class="climb-note"></div>
+        <div class="row sub"><span id="climb-moves">0手</span><span id="climb-rope"></span></div>
+        <ul class="keys climb-keys">
+          <li><kbd>WASD</kbd> 方向（斜めも可） ／ <kbd>Space</kbd> 登る</li>
+          <li><kbd>S</kbd> 長押しで手を放す ／ <kbd>右クリック</kbd> ロープ</li>
         </ul>
       </section>
 
       <!-- 中央下: 文脈ヒント -->
       <div id="hint" class="hint"></div>
-      <!-- レティクル情報 -->
-      <div id="aim" class="aim"></div>
       <div id="toast" class="toast"></div>
     </div>
 

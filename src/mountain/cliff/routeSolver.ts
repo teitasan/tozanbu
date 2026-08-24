@@ -9,12 +9,11 @@
    正解ルート自体はプレイヤーには見せない。
    =========================================================== */
 
-import { cellMoveCost, passable, type Cell } from './grid';
+import { aimNeighbours, cellMoveCost, passable, type Cell, type CellGrid } from './grid';
 
 export interface SolverInput {
   cells: Cell[];
-  /** 隣接判定に使う到達距離 (m) */
-  reach: number;
+  grid: CellGrid;
   distanceCost: number;
   maxStamina: number;
   /** ロープなどによるコスト倍率 */
@@ -30,31 +29,21 @@ export interface SolverResult {
   maxSegment: number;
 }
 
-/** そのセルから届くセル */
-export function neighbours(cells: Cell[], from: Cell, reach: number): Cell[] {
-  const out: Cell[] = [];
-  if (!from.pos) return out;
-  for (const c of cells) {
-    if (c === from || !passable(c)) continue;
-    if (from.pos.distanceTo(c.pos!) <= reach) out.push(c);
-  }
-  return out;
-}
-
-/** 隣接表をまとめて作る (何度も解くので使い回す) */
-export function buildAdjacency(cells: Cell[], reach: number): Map<Cell, Cell[]> {
+/**
+ * 隣接表をまとめて作る (何度も解くので使い回す)。
+ * 繋ぎ方は方向キー1回で行けるセルだけ。
+ * 探索が見つけたルートは、そのまま操作で辿れるものになる。
+ */
+export function buildAdjacency(
+  grid: CellGrid,
+  cells: Cell[],
+  distanceCost: number,
+  costScale = 1,
+): Map<Cell, Cell[]> {
   const map = new Map<Cell, Cell[]>();
-  const usable = cells.filter(passable);
-  for (const c of usable) map.set(c, []);
-  for (let i = 0; i < usable.length; i++) {
-    for (let j = i + 1; j < usable.length; j++) {
-      const a = usable[i];
-      const b = usable[j];
-      if (a.pos!.distanceTo(b.pos!) <= reach) {
-        map.get(a)!.push(b);
-        map.get(b)!.push(a);
-      }
-    }
+  for (const c of cells) {
+    if (!passable(c)) continue;
+    map.set(c, aimNeighbours(grid, c, distanceCost, costScale));
   }
   return map;
 }
@@ -64,9 +53,9 @@ export function buildAdjacency(cells: Cell[], reach: number): Map<Cell, Cell[]> 
  * 岩棚に着いたら 0 に戻るので、経路そのものを持って循環を避ける。
  */
 export function solveRoute(input: SolverInput): SolverResult {
-  const { cells, reach, distanceCost, maxStamina } = input;
+  const { cells, grid, distanceCost, maxStamina } = input;
   const scale = input.costScale ?? 1;
-  const adjacency = buildAdjacency(cells, reach);
+  const adjacency = buildAdjacency(grid, cells, distanceCost, scale);
   const starts = cells.filter((c) => c.ground && passable(c));
   const goals = new Set(cells.filter((c) => c.topOut && passable(c)));
 
@@ -124,8 +113,13 @@ export function solveRoute(input: SolverInput): SolverResult {
 }
 
 /** コストを無視した連結性 (補修でどこが切れているかを見る) */
-export function reachableSet(cells: Cell[], reach: number, from: Cell[]): Set<Cell> {
-  const adjacency = buildAdjacency(cells, reach);
+export function reachableSet(
+  grid: CellGrid,
+  cells: Cell[],
+  distanceCost: number,
+  from: Cell[],
+): Set<Cell> {
+  const adjacency = buildAdjacency(grid, cells, distanceCost);
   const seen = new Set<Cell>(from);
   const queue = [...from];
   while (queue.length) {

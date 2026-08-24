@@ -81,3 +81,111 @@ export function cellMoveCost(from: Cell, to: Cell, distanceCost: number, scale =
   const dy = to.pos.y - from.pos.y;
   return (GRADE_COST[to.grade] * directionMul(dy, dist) + dist * distanceCost) * scale;
 }
+
+/** セルを引ける格子 (岩壁) */
+export interface CellGrid {
+  cellAt(col: number, row: number): Cell | undefined;
+  /** 手の届く距離 (m) */
+  reach: number;
+}
+
+/** 方向キーで選べる8方向 */
+export const AIM_DIRS: ReadonlyArray<readonly [number, number]> = [
+  [0, 1],
+  [1, 1],
+  [1, 0],
+  [1, -1],
+  [0, -1],
+  [-1, -1],
+  [-1, 0],
+  [-1, 1],
+];
+
+/**
+ * その方向で試すセルの順番。
+ * 隣 → その先 → その先の左右ひとつ分。
+ * 隣が平滑でも、同じ方向へ手を伸ばせば越えられることがある。
+ */
+function scanOrder(sx: number, sy: number): Array<[number, number]> {
+  if (sx === 0 || sy === 0) {
+    return [
+      [sx, sy],
+      [sx * 2, sy * 2],
+      [sx * 2 + sy, sy * 2 + sx],
+      [sx * 2 - sy, sy * 2 - sx],
+    ];
+  }
+  return [
+    [sx, sy],
+    [sx * 2, sy * 2],
+    [sx * 2, sy],
+    [sx, sy * 2],
+  ];
+}
+
+/** 届く範囲にあるセル */
+function within(grid: CellGrid, from: Cell, dc: number, dr: number): Cell | undefined {
+  if (!from.pos) return undefined;
+  const c = grid.cellAt(from.col + dc, from.row + dr);
+  if (!c || !c.pos) return undefined;
+  return c.pos.distanceTo(from.pos) <= grid.reach ? c : undefined;
+}
+
+/**
+ * その方向へ一手出したときに掴むセル。
+ * 経路探索もこの関数でセルを繋ぐので、
+ * 「探索が見つけたルート」と「方向キーで辿れるルート」が一致する。
+ */
+export function aimedCell(
+  grid: CellGrid,
+  from: Cell,
+  sx: number,
+  sy: number,
+  distanceCost: number,
+  costScale = 1,
+): Cell | null {
+  if (!from.pos || (sx === 0 && sy === 0)) return null;
+  const order = scanOrder(sx, sy);
+  // まっすぐ届くならそれを掴む
+  for (let i = 0; i < 2; i++) {
+    const c = within(grid, from, order[i][0], order[i][1]);
+    if (passable(c)) return c;
+  }
+  // 少しずれた先まで手を伸ばす。同じ方向なので軽い方を採る
+  let best: Cell | null = null;
+  let bestCost = Infinity;
+  for (let i = 2; i < order.length; i++) {
+    const c = within(grid, from, order[i][0], order[i][1]);
+    if (!passable(c)) continue;
+    const cost = cellMoveCost(from, c, distanceCost, costScale);
+    if (cost < bestCost) {
+      bestCost = cost;
+      best = c;
+    }
+  }
+  return best;
+}
+
+/** その方向を塞いでいる平滑なセル。塞がれていなければ null */
+export function aimBlocker(grid: CellGrid, from: Cell, sx: number, sy: number): Cell | null {
+  for (const [dc, dr] of scanOrder(sx, sy)) {
+    const c = within(grid, from, dc, dr);
+    if (c) return passable(c) ? null : c;
+  }
+  return null;
+}
+
+/** 方向キーひとつで行けるセル全部 */
+export function aimNeighbours(
+  grid: CellGrid,
+  from: Cell,
+  distanceCost: number,
+  costScale = 1,
+): Cell[] {
+  const out: Cell[] = [];
+  for (const [sx, sy] of AIM_DIRS) {
+    const c = aimedCell(grid, from, sx, sy, distanceCost, costScale);
+    if (c && !out.includes(c)) out.push(c);
+  }
+  return out;
+}

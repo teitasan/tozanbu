@@ -14,7 +14,6 @@ import { Mountain, newRecord, type MountainRecord } from './mountain/Mountain';
 import { MountainRegistry } from './mountain/MountainRegistry';
 import { checkReachability } from './mountain/reachability';
 import type { ClimbWall } from './mountain/cliff/ClimbWall';
-import { passable, type Cell } from './mountain/cliff/grid';
 import { NetClient } from './net/NetClient';
 import { RemotePlayers } from './net/RemotePlayers';
 import { ClimbingController } from './player/ClimbingController';
@@ -26,7 +25,6 @@ import { TitleScreen, type StartConfig } from './ui/TitleScreen';
 
 type GameState = 'title' | 'loading' | 'playing' | 'summit';
 
-const _proj = new THREE.Vector3();
 
 class Game {
   private readonly renderer: THREE.WebGLRenderer;
@@ -52,7 +50,6 @@ class Game {
   readonly remotes = new RemotePlayers();
   private trailSyncTimer = 0;
 
-  private hovered: Cell | null = null;
   private wallScanTimer = 0;
   /** 正面にある岩壁 (ヒント表示と取り付き判定で共用) */
   private nearWall: ClimbWall | null = null;
@@ -143,18 +140,8 @@ class Game {
 
     this.climb.onNotice = (m) => this.hud.toast(m);
 
-    this.climb.onEnterPlanning = (wall, from) => {
-      // 岩壁全体を下から見上げてルートを決める
-      this.input.setLookMode('cursor');
-      this.hud.setReticle(false);
-      this.rig.setPlanView(wall.frame.base, wall.frame.outward, wall.frame.height);
-      this.hud.toast(from ? '岩棚から次のルートを組み立てる' : '岩壁を見上げてルートを組み立てる', true);
-    };
-    this.climb.onCommit = (summary) => {
-      this.rig.clearPlanView();
-      this.stats.climbMoves += summary.steps;
-      this.hud.setPlan(null);
-      this.hud.toast(`${summary.steps}手のルートを登る`, true);
+    this.climb.onEnter = () => {
+      this.hud.toast('岩壁に取り付いた — WASD で方向、Space で登る', true);
     };
     this.climb.onRopeFixed = (wall) => {
       this.stats.ropesFixed += 1;
@@ -162,21 +149,14 @@ class Game {
       if (rope) this.net.sendRope(rope);
     };
     this.climb.onExit = (reason) => {
-      this.rig.clearPlanView();
-      this.hud.setPlan(null);
-      this.input.setLookMode('pointerlock');
-      // 壁から離れたら視点操作を元に戻す (拒否されたら次のクリックで掛け直す)
-      this.input.requestLock(true);
-      this.hud.setReticle(this.input.mode === 'pointerlock');
+      this.hud.setClimb(null);
+      this.stats.climbMoves += this.climb.moveCount;
       if (reason === 'stamina') {
         this.stats.falls += 1;
         this.hud.toast('スタミナが尽きて落ちた');
       } else if (reason === 'letgo') {
         this.stats.falls += 1;
         this.hud.toast('手を放した');
-      } else if (reason === 'stranded') {
-        this.stats.falls += 1;
-        this.hud.toast('ルートが尽きた。掴まる場所が無い');
       }
     };
 
@@ -343,9 +323,8 @@ class Game {
     });
 
     this.updateWalls(dt, forward);
-    this.updateAim();
-    this.handleActions();
-    this.climb.update(dt, this.hovered);
+    this.handleActions(dt);
+    this.climb.update(dt);
 
     // 環境と疲労
     this.stamina.setAltitude(this.player.position.y);
@@ -408,7 +387,11 @@ class Game {
 
     // 壁に正面から押し当て続けると登攀へ移行する (専用キーなし)
     if (this.nearWall && this.player.grounded && this.player.blockedTime > 0.25) {
-      if (this.climb.startPlanning(this.nearWall, null, this.player.position)) this.player.blockedTime = 0;
+      const wall = this.nearWall;
+      if (this.climb.start(wall, null, this.player.position)) {
+        this.player.blockedTime = 0;
+        this.rig.faceWall(wall.frame.outward);
+      }
     }
   }
 
@@ -425,90 +408,32 @@ class Game {
     return null;
   }
 
-  /** 照準の先にあるセル */
-  private updateAim(): void {
-    const mountain = this.mountain;
-    if (!mountain) {
-      this.hovered = null;
-      return;
-    }
-
-    // グリッドは見せないので、レイキャストではなく
-    // 「カーソルにいちばん近いセル」を拾う。岩肌を見て指す操作にする
-    if (this.climb.isPlanning && this.climb.wall) {
-      this.hovered = this.pickNearestCell(this.climb.wall.cells);
-      this.describeAim();
-      return;
-    }
-    this.hovered = null;
-    this.hud.setAim(null);
+  /** 画面の右が壁のどちら向きか。方向キーを見た目どおりに効かせる */
+  private wallTangentSign(): number {
+    const wall = this.climb.wall;
+    if (!wall) return 1;
+    const rx = Math.cos(this.rig.yaw);
+    const rz = -Math.sin(this.rig.yaw);
+    const dot = rx * wall.frame.tangent.x + rz * wall.frame.tangent.z;
+    return dot >= 0 ? 1 : -1;
   }
 
-  /** カーソルにいちばん近いセルを拾う (画面上の距離で判定) */
-  private pickNearestCell(cells: Cell[]): Cell | null {
-    const canvas = this.renderer.domElement;
-    const w = Math.max(1, canvas.clientWidth || window.innerWidth);
-    const h = Math.max(1, canvas.clientHeight || window.innerHeight);
-    const cx = this.input.mode === 'pointerlock' ? 0 : this.input.cursor.x;
-    const cy = this.input.mode === 'pointerlock' ? 0 : this.input.cursor.y;
-    let best: Cell | null = null;
-    let bestScore = Infinity;
-    for (const cell of cells) {
-      if (!cell.pos) continue;
-      _proj.copy(cell.pos).project(this.rig.camera);
-      if (_proj.z > 1) continue;
-      const dx = ((_proj.x - cx) * w) / 2;
-      const dy = ((_proj.y - cy) * h) / 2;
-      const dist = Math.hypot(dx, dy);
-      if (dist > 40) continue;
-      // 繋げられるセルを優先して拾う
-      const score = dist + (this.climb.canAppend(cell) ? 0 : 16);
-      if (score < bestScore) {
-        bestScore = score;
-        best = cell;
-      }
-    }
-    return best;
-  }
-
-  /** 照準に入っているセルの説明 */
-  private describeAim(): void {
-    const cell = this.hovered;
-    if (!cell || !this.climb.isPlanning) {
-      this.hud.setAim(null);
-      return;
-    }
-    if (!passable(cell)) {
-      this.hud.setAim({ text: '手がかりが無い', state: 'ng' });
-      return;
-    }
-    if (!this.climb.canAppend(cell)) {
-      this.hud.setAim({
-        text: this.climb.plan.some((s) => s.cell === cell) ? 'ルートに入っている' : '手が届かない',
-        state: 'ng',
-      });
-      return;
-    }
-    const cost = this.climb.costTo(cell);
-    const after = this.climb.projectedStaminaAt(cell);
-    const rest = cell.rest ? '（岩棚）' : '';
-    if (after <= 0) this.hud.setAim({ text: `消費 ${cost.toFixed(0)} — ここで力尽きる`, state: 'ng' });
-    else this.hud.setAim({ text: `消費 ${cost.toFixed(0)} → 残り ${Math.round(after)}${rest}`, state: 'ok' });
-  }
-
-  private handleActions(): void {
+  private handleActions(dt: number): void {
     if (!this.climb.isClimbing) return;
 
-    if (this.climb.isPlanning) {
-      if (this.input.clicked && this.hovered) this.climb.append(this.hovered);
-      if (this.input.rightClicked) this.climb.undo();
-      if (this.input.wasPressed('ShiftLeft') || this.input.wasPressed('ShiftRight')) this.climb.toggleRope();
-      if (this.input.wasPressed('Space')) this.climb.commit();
-      if (this.input.wasPressed('KeyS')) this.climb.cancel();
-      return;
-    }
-    // 実行中は手を放すことだけできる
-    if (this.input.wasPressed('KeyS')) this.climb.letGo();
+    // WASD で壁を基準にした方向を選ぶ (斜めも可)
+    let dx = 0;
+    let dy = 0;
+    if (this.input.isDown('KeyW')) dy += 1;
+    if (this.input.isDown('KeyS')) dy -= 1;
+    if (this.input.isDown('KeyA')) dx -= 1;
+    if (this.input.isDown('KeyD')) dx += 1;
+    this.climb.setAim(dx, dy, this.wallTangentSign());
+
+    if (this.input.wasPressed('Space')) this.climb.step();
+    if (this.input.rightClicked) this.climb.fixRope(this.config?.playerName ?? 'you');
+    // S 長押しで手を放す (下端では降りるだけ)
+    this.climb.holdLetGo(dt, this.input.isDown('KeyS'));
   }
 
   private updateSun(): void {
@@ -612,19 +537,25 @@ class Game {
       party,
     });
 
-    if (this.climb.isPlanning) {
-      const sum = this.climb.summary();
-      this.hud.setPlan({
-        steps: sum.steps,
-        totalCost: sum.totalCost,
-        endStamina: sum.endStamina,
-        failsAt: sum.failsAt,
-        ending: sum.ending,
-        useRope: sum.useRope,
+    if (this.climb.isClimbing) {
+      const m = this.climb.nextMove();
+      this.hud.setClimb({
+        arrow: m.arrow,
+        grade: m.grade,
+        cost: m.cost,
+        staminaAfter: m.staminaAfter,
+        rest: m.rest,
+        ok: m.ok,
+        reason: m.reason,
+        topOut: m.topOut,
+        stepDown: m.stepDown,
+        moves: this.climb.moveCount,
         ropesLeft: this.ropes.carried,
+        roped: this.climb.wall ? this.ropes.hasRope(this.climb.wall.id) : false,
+        letGo: this.climb.letGoRatio,
       });
     } else {
-      this.hud.setPlan(null);
+      this.hud.setClimb(null);
     }
 
     this.hud.setHint(this.currentHint(snow.russelling));
@@ -632,13 +563,7 @@ class Game {
 
   private currentHint(russelling: boolean): string | null {
     if (this.input.needsClickToLock) return 'クリックで視点を操作する';
-    if (this.climb.isPlanning) {
-      // 操作はルートパネルに出しているので、ここでは状況だけ
-      return this.climb.plan.length === 0
-        ? '岩壁を見上げている — 繋げるホールドをクリック'
-        : `${this.climb.plan.length}手ぶん組み立てた — <kbd>Space</kbd> で登る`;
-    }
-    if (this.climb.isClimbing) return '登攀中 — <kbd>S</kbd> で手を放す';
+    if (this.climb.isClimbing) return null; // 操作は登攀パネルに出している
     if (this.player.isMantling) return null;
     if (this.mountain && this.player.grounded) {
       const target = this.player.mantleTarget(this.mountain.field, this.rig.yaw);

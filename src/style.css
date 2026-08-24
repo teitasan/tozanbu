@@ -34,8 +34,6 @@ html, body {
   background: rgba(255, 255, 255, 0.85);
   box-shadow: 0 0 0 1.5px rgba(0, 0, 0, 0.55);
 }
-#reticle.aiming span { width: 11px; height: 11px; background: var(--accent); }
-#reticle.blocked span { background: var(--danger); }
 
 /* ---------- パネル ---------- */
 .panel {
@@ -50,25 +48,29 @@ html, body {
 #body-panel { top: 12px; left: 12px; width: 250px; }
 #mountain-panel { top: 12px; right: 12px; width: 250px; }
 
-#plan-panel {
+#climb-panel {
   top: 190px;
   left: 12px;
   width: 264px;
 }
-.plan-warn {
+.next-move { display: flex; align-items: center; gap: 10px; margin: 2px 0 4px; }
+.next-move .arrow { font-size: 30px; line-height: 1; width: 34px; text-align: center; color: var(--gold); }
+.next-body { flex: 1; min-width: 0; }
+.next-body .sub { color: var(--muted); font-size: 11.5px; }
+.climb-note {
   margin: 4px 0 2px;
   font-size: 12px;
   font-weight: 600;
   color: var(--danger);
   min-height: 17px;
 }
-.plan-warn.ok {
+.climb-note.ok {
   color: var(--accent);
 }
-.plan-warn.warn {
+.climb-note.warn {
   color: var(--warn);
 }
-.plan-keys {
+.climb-keys {
   margin-top: 6px;
   padding-top: 5px;
   border-top: 1px solid var(--panel-border);
@@ -112,15 +114,6 @@ html, body {
 .hint.show { opacity: 1; }
 .hint kbd { background: rgba(255,255,255,0.16); border-radius: 3px; padding: 0 5px; font-family: inherit; }
 
-.aim {
-  position: absolute; left: 50%; top: calc(50% + 26px); transform: translateX(-50%);
-  padding: 4px 10px; border-radius: 6px; background: rgba(12,16,22,0.7);
-  font-size: 12px; opacity: 0; transition: opacity .12s; white-space: nowrap;
-}
-.aim.show { opacity: 1; }
-.aim .ok { color: var(--accent); }
-.aim .ng { color: var(--danger); }
-.aim .warn { color: var(--warn); }
 
 .toast {
   position: absolute; left: 50%; bottom: 108px; transform: translateX(-50%);

@@ -12,21 +12,30 @@ export interface PartyMember {
   self?: boolean;
 }
 
-export interface AimInfo {
-  text: string;
-  state: 'ok' | 'ng' | 'warn';
+export interface ClimbView {
+  /** 選んでいる方向 */
+  arrow: string;
+  grade: 'easy' | 'medium' | 'hard' | 'impossible' | null;
+  cost: number;
+  staminaAfter: number;
+  rest: boolean;
+  ok: boolean;
+  reason: string;
+  topOut: boolean;
+  stepDown: boolean;
+  moves: number;
+  ropesLeft: number;
+  roped: boolean;
+  /** 手を放しかけている度合い (0..1) */
+  letGo: number;
 }
 
-export interface PlanView {
-  steps: number;
-  totalCost: number;
-  endStamina: number;
-  /** 力尽きる手の番号 (1始まり)。落ちないなら 0 */
-  failsAt: number;
-  ending: 'top' | 'ledge' | 'air';
-  useRope: boolean;
-  ropesLeft: number;
-}
+const GRADE_TEXT: Record<string, string> = {
+  easy: '易しい岩',
+  medium: '並の岩',
+  hard: '難しい岩',
+  impossible: '取り付けない',
+};
 
 export interface HudData {
   action: PlayerAction;
@@ -71,15 +80,14 @@ export class HUD {
   private readonly mtnRock = el('mtn-rock');
   private readonly progressBar = el('progress-bar');
   private readonly partyEl = el('party');
-  private readonly planPanel = el('plan-panel');
-  private readonly planSteps = el('plan-steps');
-  private readonly planCost = el('plan-cost');
-  private readonly planEnd = el('plan-end');
-  private readonly planEnding = el('plan-ending');
-  private readonly planRope = el('plan-rope');
-  private readonly planWarn = el('plan-warn');
+  private readonly climbPanel = el('climb-panel');
+  private readonly climbArrow = el('climb-arrow');
+  private readonly climbGrade = el('climb-grade');
+  private readonly climbCost = el('climb-cost');
+  private readonly climbNote = el('climb-note');
+  private readonly climbMoves = el('climb-moves');
+  private readonly climbRope = el('climb-rope');
   private readonly hintEl = el('hint');
-  private readonly aimEl = el('aim');
   private readonly toastEl = el('toast');
 
   private readonly loading = el('loading');
@@ -150,50 +158,64 @@ export class HUD {
     }
   }
 
-  /** ルート組み立ての表示。null で閉じる */
-  setPlan(p: PlanView | null): void {
-    if (!p) {
-      this.planPanel.classList.add('hidden');
+  /** 登攀中の表示。null で閉じる */
+  setClimb(c: ClimbView | null): void {
+    if (!c) {
+      this.climbPanel.classList.add('hidden');
       return;
     }
-    this.planPanel.classList.remove('hidden');
-    this.planSteps.textContent = `${p.steps}`;
-    this.planCost.textContent = p.totalCost.toFixed(0);
-    this.planEnd.textContent = `${Math.max(0, Math.round(p.endStamina))}`;
-    this.planRope.textContent = p.useRope ? `ロープ使用 (残 ${p.ropesLeft})` : `ロープ ${p.ropesLeft}`;
+    this.climbPanel.classList.remove('hidden');
+    this.climbArrow.textContent = c.arrow;
+    this.climbMoves.textContent = `${c.moves}手`;
+    this.climbRope.textContent = c.roped ? 'ロープ有効' : `ロープ ${c.ropesLeft}`;
 
-    const endingText =
-      p.ending === 'top' ? '終点: 壁の上へ抜けられる' : p.ending === 'ledge' ? '終点: 岩棚で一息つける' : '終点: 掴まる場所が無い';
-    this.planEnding.textContent = p.steps === 0 ? 'ホールドをクリックして繋ぐ' : endingText;
+    if (c.letGo > 0.12) {
+      this.climbGrade.textContent = '手を放そうとしている';
+      this.climbCost.textContent = `${'▮'.repeat(Math.round(c.letGo * 8)).padEnd(8, '▯')}`;
+      this.climbNote.textContent = '離せば掴んだまま';
+      this.climbNote.className = 'climb-note warn';
+      return;
+    }
 
-    if (p.steps === 0) {
-      this.planWarn.textContent = '';
-      this.planWarn.className = 'plan-warn';
-    } else if (p.failsAt > 0) {
-      this.planWarn.textContent = `${p.failsAt}手目で力尽きて落ちる`;
-      this.planWarn.className = 'plan-warn';
-    } else if (p.ending === 'air') {
-      this.planWarn.textContent = '登り切っても抜けられない';
-      this.planWarn.className = 'plan-warn warn';
-    } else if (p.ending === 'ledge') {
-      this.planWarn.textContent = '岩棚まで登れる（そこで組み直せる）';
-      this.planWarn.className = 'plan-warn ok';
+    if (c.topOut) {
+      this.climbGrade.textContent = '壁の上へ';
+      this.climbCost.textContent = 'Space で抜ける';
+      this.climbNote.textContent = 'ここから乗り越えられる';
+      this.climbNote.className = 'climb-note ok';
+      return;
+    }
+    if (c.stepDown) {
+      this.climbGrade.textContent = '地面へ';
+      this.climbCost.textContent = 'Space で降りる';
+      this.climbNote.textContent = '';
+      this.climbNote.className = 'climb-note';
+      return;
+    }
+    if (!c.grade) {
+      this.climbGrade.textContent = c.reason || '方向を選ぶ';
+      this.climbCost.textContent = 'WASD で方向 ／ Space で1手';
+      this.climbNote.textContent = '';
+      this.climbNote.className = 'climb-note';
+      return;
+    }
+
+    this.climbGrade.textContent = GRADE_TEXT[c.grade] + (c.rest ? '（岩棚）' : '');
+    this.climbCost.textContent = c.ok
+      ? `消費 ${c.cost.toFixed(0)} → 残り ${Math.max(0, Math.round(c.staminaAfter))}`
+      : c.reason;
+    if (!c.ok) {
+      this.climbNote.textContent = c.reason;
+      this.climbNote.className = 'climb-note';
+    } else if (c.staminaAfter <= 0) {
+      this.climbNote.textContent = 'この一手で力尽きる';
+      this.climbNote.className = 'climb-note';
+    } else if (c.rest) {
+      this.climbNote.textContent = '乗れば息を整えられる';
+      this.climbNote.className = 'climb-note ok';
     } else {
-      this.planWarn.textContent = 'この壁を抜けられる';
-      this.planWarn.className = 'plan-warn ok';
+      this.climbNote.textContent = '';
+      this.climbNote.className = 'climb-note';
     }
-  }
-
-  setAim(info: AimInfo | null): void {
-    if (!info) {
-      this.aimEl.classList.remove('show');
-      this.reticle.classList.remove('aiming', 'blocked');
-      return;
-    }
-    this.aimEl.innerHTML = `<span class="${info.state}">${info.text}</span>`;
-    this.aimEl.classList.add('show');
-    this.reticle.classList.toggle('aiming', info.state === 'ok');
-    this.reticle.classList.toggle('blocked', info.state === 'ng');
   }
 
   setHint(text: string | null): void {
