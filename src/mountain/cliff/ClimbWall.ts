@@ -44,8 +44,8 @@ const EASE: Record<CellGrade, CellGrade> = {
 };
 
 const _scale = new THREE.Vector3();
-const _mat = new THREE.Matrix4();
 const _up = new THREE.Vector3(0, 1, 0);
+const _origin = new THREE.Vector3();
 const _look = new THREE.Matrix4();
 
 export class ClimbWall {
@@ -109,24 +109,41 @@ export class ClimbWall {
     const startZ = f.base.z + f.tangent.z * u + f.outward.z * 3.5;
     const stepLen = 0.3;
     const steps = Math.ceil(Math.min(28, 8 + f.height * 1.4) / stepLen);
-    let prevX = startX;
-    let prevZ = startZ;
+    let prev = -1;
     for (let i = 0; i < steps; i++) {
-      const x = startX - f.outward.x * (i * stepLen);
-      const z = startZ - f.outward.z * (i * stepLen);
+      const d = i * stepLen;
+      const x = startX - f.outward.x * d;
+      const z = startZ - f.outward.z * d;
       if (!this.field.inside(x, z)) {
-        prevX = x;
-        prevZ = z;
+        prev = d;
         continue;
       }
       if (this.field.heightAt(x, z) >= y) {
-        out.set(prevX + f.outward.x * 0.16, y, prevZ + f.outward.z * 0.16);
+        // 粗い刻みだと最大 0.3m ずれるので、二分探索で壁面まで詰める。
+        // ここがずれると岩の造形が壁から浮いて見える
+        let lo = prev < 0 ? d - stepLen : prev; // まだ岩の外
+        let hi = d; // すでに岩の中
+        for (let k = 0; k < 10; k++) {
+          const mid = (lo + hi) * 0.5;
+          const mx = startX - f.outward.x * mid;
+          const mz = startZ - f.outward.z * mid;
+          if (this.field.inside(mx, mz) && this.field.heightAt(mx, mz) >= y) hi = mid;
+          else lo = mid;
+        }
+        out.set(startX - f.outward.x * hi, y, startZ - f.outward.z * hi);
         return out;
       }
-      prevX = x;
-      prevZ = z;
+      prev = d;
     }
     return null;
+  }
+
+  /** その点の壁面法線 (水平成分を主とする、岩から外向き) */
+  private surfaceNormal(pos: THREE.Vector3, out = new THREE.Vector3()): THREE.Vector3 {
+    const n = this.field.normalAt(pos.x, pos.z);
+    out.set(n.x, Math.max(0, n.y) * 0.25, n.z);
+    if (out.lengthSq() < 1e-6) out.set(this.frame.outward.x, 0.2, this.frame.outward.z);
+    return out.normalize();
   }
 
   /** その位置から壁の上へ抜けられるか */
@@ -191,12 +208,14 @@ export class ClimbWall {
         const { u, v } = this.cellUV(col, row);
         const found = this.surfacePoint(u, v, pos);
         quals.push(quality(u, v));
+        const p = found ? found.clone() : null;
         this.cells.push({
           col,
           row,
           grade: 'medium',
           rest: false,
-          pos: found ? found.clone() : null,
+          pos: p,
+          normal: p ? this.surfaceNormal(p) : this.frame.outward.clone(),
           ground: false,
           topOut: false,
         });
@@ -390,62 +409,67 @@ export class ClimbWall {
 
   // --- 岩肌の造形 ---------------------------------------------------------
 
-  /** セルの向き (壁の法線を向く) */
-  private cellQuaternion(out = new THREE.Quaternion()): THREE.Quaternion {
-    const f = this.frame;
-    _look.lookAt(new THREE.Vector3(0, 0, 0), new THREE.Vector3(f.outward.x, 0.25, f.outward.z), _up);
+  /** その法線を向く姿勢 */
+  private orientationFor(normal: THREE.Vector3, out = new THREE.Quaternion()): THREE.Quaternion {
+    _look.lookAt(_origin, normal, _up);
     return out.setFromRotationMatrix(_look);
   }
 
   /**
    * 難易度を岩肌の造形として置く。
    * 色ではなく形で伝える (連続した岩壁に見えるように、色は岩質のまま)。
+   * セルごとの法線に合わせ、奥行きの半分を岩に埋めて生やす。
    */
   private buildRockDetail(seed: number): void {
     const rng = makeRng(seed + 991);
-    const q = this.cellQuaternion();
     const rock = new THREE.Color(0x8d8880);
-
     const buckets: Record<string, THREE.Matrix4[]> = { block: [], slab: [], bump: [], sliver: [] };
+    const q = new THREE.Quaternion();
+    const right = new THREE.Vector3();
+    const upAxis = new THREE.Vector3();
 
     for (const cell of this.cells) {
       if (!cell.pos) continue;
+      const n = cell.normal;
+      this.orientationFor(n, q);
+      // 壁面に沿う2軸 (法線に直交)
+      right.set(-n.z, 0, n.x).normalize();
+      upAxis.crossVectors(n, right).normalize();
+
       const jitter = (s: number) => (rng() - 0.5) * s;
       const place = (
         kind: keyof typeof buckets,
-        dx: number,
-        dy: number,
+        du: number,
+        dv: number,
         sx: number,
         sy: number,
         sz: number,
       ) => {
-        const f = this.frame;
-        const p = new THREE.Vector3(
-          cell.pos!.x + f.tangent.x * dx + f.outward.x * (sz * 0.35),
-          cell.pos!.y + dy,
-          cell.pos!.z + f.tangent.z * dx + f.outward.z * (sz * 0.35),
-        );
-        buckets[kind].push(_mat.clone().compose(p, q, _scale.set(sx, sy, sz)));
+        // 奥行きの 45% を岩に埋める。浮いて見えないように
+        const p = new THREE.Vector3()
+          .copy(cell.pos!)
+          .addScaledVector(right, du)
+          .addScaledVector(upAxis, dv)
+          .addScaledVector(n, sz * 0.05);
+        buckets[kind].push(new THREE.Matrix4().compose(p, q, _scale.set(sx, sy, sz)));
       };
 
       switch (cell.grade) {
         case 'easy':
           if (cell.rest) {
-            // 岩棚。乗れる大きさの平らな段
-            place('slab', jitter(0.2), -0.05, 1.05 + rng() * 0.4, 0.16, 0.5 + rng() * 0.2);
+            place('slab', jitter(0.2), -0.08, 1.0 + rng() * 0.35, 0.15, 0.45 + rng() * 0.18);
           }
-          place('block', jitter(0.35), jitter(0.3), 0.42 + rng() * 0.2, 0.3 + rng() * 0.14, 0.26 + rng() * 0.12);
-          if (rng() < 0.5) place('block', jitter(0.5), jitter(0.4), 0.3 + rng() * 0.14, 0.22, 0.2);
+          place('block', jitter(0.35), jitter(0.3), 0.4 + rng() * 0.18, 0.28 + rng() * 0.12, 0.24 + rng() * 0.1);
+          if (rng() < 0.5) place('block', jitter(0.5), jitter(0.4), 0.28 + rng() * 0.12, 0.2, 0.18);
           break;
         case 'medium':
-          place('bump', jitter(0.4), jitter(0.4), 0.17 + rng() * 0.07, 0.14 + rng() * 0.06, 0.13 + rng() * 0.05);
-          place('bump', jitter(0.45), jitter(0.45), 0.13 + rng() * 0.06, 0.11 + rng() * 0.05, 0.1 + rng() * 0.04);
-          if (rng() < 0.4) place('bump', jitter(0.5), jitter(0.5), 0.1, 0.09, 0.08);
+          place('bump', jitter(0.4), jitter(0.4), 0.17 + rng() * 0.07, 0.14 + rng() * 0.06, 0.12 + rng() * 0.05);
+          place('bump', jitter(0.45), jitter(0.45), 0.13 + rng() * 0.06, 0.11 + rng() * 0.05, 0.09 + rng() * 0.04);
+          if (rng() < 0.4) place('bump', jitter(0.5), jitter(0.5), 0.1, 0.09, 0.07);
           break;
         case 'hard':
-          // 細いクラック / 小さなエッジ
-          place('sliver', jitter(0.4), jitter(0.25), 0.055 + rng() * 0.03, 0.42 + rng() * 0.3, 0.1 + rng() * 0.05);
-          if (rng() < 0.45) place('sliver', jitter(0.45), jitter(0.3), 0.05, 0.2 + rng() * 0.15, 0.07);
+          place('sliver', jitter(0.4), jitter(0.25), 0.05 + rng() * 0.03, 0.4 + rng() * 0.28, 0.08 + rng() * 0.04);
+          if (rng() < 0.45) place('sliver', jitter(0.45), jitter(0.3), 0.045, 0.18 + rng() * 0.14, 0.06);
           break;
         case 'impossible':
           // ほぼ平滑。何も置かない
@@ -488,8 +512,14 @@ export class ClimbWall {
       new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95, depthTest: false }),
     );
     m.renderOrder = 5;
-    m.quaternion.copy(this.cellQuaternion());
     return m;
+  }
+
+  /** マーカーをそのセルの壁面に貼り付ける */
+  private placeMarker(m: THREE.Mesh, cell: Cell): void {
+    m.visible = true;
+    m.position.copy(cell.pos!).addScaledVector(cell.normal, 0.1);
+    this.orientationFor(cell.normal, m.quaternion);
   }
 
   /** カーソルが指しているセルを示す */
@@ -498,8 +528,7 @@ export class ClimbWall {
       this.hoverMarker.visible = false;
       return;
     }
-    this.hoverMarker.visible = true;
-    this.hoverMarker.position.copy(cell.pos).addScaledVector(this.frame.outward, 0.18);
+    this.placeMarker(this.hoverMarker, cell);
   }
 
   /** 選んだルートを示す */
@@ -512,12 +541,8 @@ export class ClimbWall {
     for (let i = 0; i < this.routeMarkers.length; i++) {
       const m = this.routeMarkers[i];
       const c = cells[i];
-      if (c?.pos) {
-        m.visible = true;
-        m.position.copy(c.pos).addScaledVector(this.frame.outward, 0.16);
-      } else {
-        m.visible = false;
-      }
+      if (c?.pos) this.placeMarker(m, c);
+      else m.visible = false;
     }
   }
 

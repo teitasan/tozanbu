@@ -44,12 +44,21 @@ export interface PlanSummary {
   useRope: boolean;
 }
 
-/** そのセルに取り付いているときのプレイヤーの位置 */
-function anchorFor(wall: ClimbWall, cell: Cell, out = new THREE.Vector3()): THREE.Vector3 {
-  const n = wall.frame.outward;
+const _right = new THREE.Vector3();
+const _wallUp = new THREE.Vector3();
+
+/**
+ * そのセルに取り付いているときのプレイヤーの位置。
+ * 下げる方向はワールドの真下ではなく壁面に沿った下向きにする。
+ * 真下に下げると、寝た壁では岩にめり込んでしまう。
+ */
+function anchorFor(_wall: ClimbWall, cell: Cell, out = new THREE.Vector3()): THREE.Vector3 {
+  const n = cell.normal;
   const p = cell.pos!;
-  if (cell.rest) return out.set(p.x + n.x * 0.34, p.y + 0.12, p.z + n.z * 0.34);
-  return out.set(p.x + n.x * 0.42, p.y - 0.75, p.z + n.z * 0.42);
+  if (cell.rest) return out.set(p.x + n.x * 0.36, p.y + 0.14, p.z + n.z * 0.36);
+  _right.set(-n.z, 0, n.x).normalize();
+  _wallUp.crossVectors(n, _right).normalize();
+  return out.copy(p).addScaledVector(_wallUp, -0.62).addScaledVector(n, 0.48);
 }
 
 const smoothstep = (t: number) => t * t * (3 - 2 * t);

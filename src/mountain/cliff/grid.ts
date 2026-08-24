@@ -51,6 +51,8 @@ export interface Cell {
   rest: boolean;
   /** 壁面上の座標。取れなかったセルは null (通れない) */
   pos: THREE.Vector3 | null;
+  /** その点の壁面法線 (岩から外向き)。造形と表示の向きに使う */
+  normal: THREE.Vector3;
   /** 地上から取り付けるセル */
   ground: boolean;
   /** ここから壁の上へ抜けられる */
