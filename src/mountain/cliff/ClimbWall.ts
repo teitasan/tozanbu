@@ -90,7 +90,7 @@ export class ClimbWall {
     this.report = repair.report;
     this.repairs = repair.repairs;
 
-    this.buildRockDetail(seed);
+    this.buildRockDetail(seed, surface.rockKind.color);
     this.hoverMarker = this.buildMarker(0xffffff, 0.42);
     this.hoverMarker.visible = false;
     this.group.add(this.hoverMarker);
@@ -420,9 +420,8 @@ export class ClimbWall {
    * 色ではなく形で伝える (連続した岩壁に見えるように、色は岩質のまま)。
    * セルごとの法線に合わせ、奥行きの半分を岩に埋めて生やす。
    */
-  private buildRockDetail(seed: number): void {
+  private buildRockDetail(seed: number, rockColor: THREE.Color): void {
     const rng = makeRng(seed + 991);
-    const rock = new THREE.Color(0x8d8880);
     const buckets: Record<string, THREE.Matrix4[]> = { block: [], slab: [], bump: [], sliver: [] };
     const q = new THREE.Quaternion();
     const right = new THREE.Vector3();
@@ -432,7 +431,6 @@ export class ClimbWall {
       if (!cell.pos) continue;
       const n = cell.normal;
       this.orientationFor(n, q);
-      // 壁面に沿う2軸 (法線に直交)
       right.set(-n.z, 0, n.x).normalize();
       upAxis.crossVectors(n, right).normalize();
 
@@ -454,22 +452,22 @@ export class ClimbWall {
         buckets[kind].push(new THREE.Matrix4().compose(p, q, _scale.set(sx, sy, sz)));
       };
 
+      // 1セルにつき造形はひとつ。数で埋めると岩屑を撒いたように見える
       switch (cell.grade) {
         case 'easy':
           if (cell.rest) {
-            place('slab', jitter(0.2), -0.08, 1.0 + rng() * 0.35, 0.15, 0.45 + rng() * 0.18);
+            // 岩棚。乗れる幅の平らな段
+            place('slab', jitter(0.15), -0.06, 0.9 + rng() * 0.3, 0.13, 0.38 + rng() * 0.12);
+          } else {
+            place('block', jitter(0.25), jitter(0.2), 0.34 + rng() * 0.14, 0.24 + rng() * 0.1, 0.2 + rng() * 0.08);
           }
-          place('block', jitter(0.35), jitter(0.3), 0.4 + rng() * 0.18, 0.28 + rng() * 0.12, 0.24 + rng() * 0.1);
-          if (rng() < 0.5) place('block', jitter(0.5), jitter(0.4), 0.28 + rng() * 0.12, 0.2, 0.18);
           break;
         case 'medium':
-          place('bump', jitter(0.4), jitter(0.4), 0.17 + rng() * 0.07, 0.14 + rng() * 0.06, 0.12 + rng() * 0.05);
-          place('bump', jitter(0.45), jitter(0.45), 0.13 + rng() * 0.06, 0.11 + rng() * 0.05, 0.09 + rng() * 0.04);
-          if (rng() < 0.4) place('bump', jitter(0.5), jitter(0.5), 0.1, 0.09, 0.07);
+          place('bump', jitter(0.3), jitter(0.3), 0.16 + rng() * 0.06, 0.13 + rng() * 0.05, 0.1 + rng() * 0.04);
           break;
         case 'hard':
-          place('sliver', jitter(0.4), jitter(0.25), 0.05 + rng() * 0.03, 0.4 + rng() * 0.28, 0.08 + rng() * 0.04);
-          if (rng() < 0.45) place('sliver', jitter(0.45), jitter(0.3), 0.045, 0.18 + rng() * 0.14, 0.06);
+          // 細いクラック / 小さなエッジ
+          place('sliver', jitter(0.3), jitter(0.2), 0.045 + rng() * 0.02, 0.36 + rng() * 0.22, 0.06 + rng() * 0.03);
           break;
         case 'impossible':
           // ほぼ平滑。何も置かない
@@ -483,7 +481,8 @@ export class ClimbWall {
       bump: new THREE.IcosahedronGeometry(0.5, 0),
       sliver: new THREE.BoxGeometry(1, 1, 1),
     };
-    const tint: Record<string, number> = { block: 1.12, slab: 1.18, bump: 1.04, sliver: 0.92 };
+    // 岩質と同じ色にする。明度だけ少し変えて陰影で形が読めるようにする
+    const tint: Record<string, number> = { block: 1.1, slab: 1.14, bump: 1.03, sliver: 0.9 };
 
     for (const kind of Object.keys(buckets) as (keyof typeof buckets)[]) {
       const list = buckets[kind];
@@ -491,7 +490,7 @@ export class ClimbWall {
       const mesh = new THREE.InstancedMesh(
         geo[kind],
         new THREE.MeshStandardMaterial({
-          color: rock.clone().multiplyScalar(tint[kind]),
+          color: rockColor.clone().multiplyScalar(tint[kind]),
           roughness: 1,
           flatShading: true,
         }),
