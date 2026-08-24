@@ -3,19 +3,6 @@
    バランス調整はまずここを見る。
    =========================================================== */
 
-import type * as THREE from 'three';
-
-/** ホールドの種類 = 掴みやすさ */
-export type HoldType = 'large' | 'normal' | 'small' | 'bad' | 'ledge';
-
-/** 登攀可能箇所の最小データ */
-export interface HoldData {
-  id: string;
-  type: HoldType;
-  position: THREE.Vector3;
-  baseStaminaCost: number;
-}
-
 /** 採用する基本アクション7種 (+ 表示用の補助状態) */
 export type PlayerAction =
   | 'WALK'
@@ -40,29 +27,8 @@ export const ACTION_LABEL: Record<PlayerAction, string> = {
   REST: '休憩',
 };
 
-export const HOLD_BASE_COST: Record<HoldType, number> = {
-  large: 5,
-  normal: 10,
-  small: 18,
-  bad: 30,
-  ledge: 5,
-};
 
-export const HOLD_COLOR: Record<HoldType, number> = {
-  large: 0x3fa34d,
-  normal: 0x3f7fd4,
-  small: 0xe08a2e,
-  bad: 0xc7413c,
-  ledge: 0xd8d2c0,
-};
 
-export const HOLD_LABEL: Record<HoldType, string> = {
-  large: '大',
-  normal: '通常',
-  small: '小',
-  bad: '悪い',
-  ledge: '岩棚',
-};
 
 /** 登攀 */
 export const CLIMB = {

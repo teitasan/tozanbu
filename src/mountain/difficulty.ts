@@ -38,15 +38,11 @@ export interface DifficultyProfile {
 
   // --- 登攀生成 ---
   climb: {
-    /** ホールド密度 (1平方m あたり) */
-    density: number;
-    /** 到達可能距離 (m) */
+    /** 到達可能距離 (m)。この距離以内のセルへ移れる */
     reach: number;
-    /** 高コストホールド (small/bad) の比率 */
-    hardRatio: number;
-    /** 行き止まりの比率 */
-    deadEndRatio: number;
-    /** 休憩地点 (ledge) の比率 */
+    /** セル難易度の分布。合計 1 */
+    grades: { easy: number; medium: number; hard: number; impossible: number };
+    /** easy セルが岩棚 (休憩できる) になる割合 */
     restRatio: number;
   };
 
@@ -72,7 +68,7 @@ const PROFILES: Record<DifficultyLevel, DifficultyProfile> = {
     cliffFracVar: 0.06,
     snowLine: 1.6,
     snowMax: 0,
-    climb: { density: 0.26, reach: 2.6, hardRatio: 0.1, deadEndRatio: 0.05, restRatio: 0.3 },
+    climb: { reach: 2.6, grades: { easy: 0.52, medium: 0.36, hard: 0.09, impossible: 0.03 }, restRatio: 0.3 },
     ropes: 0,
     fatigueScale: 0.4,
   },
@@ -90,7 +86,7 @@ const PROFILES: Record<DifficultyLevel, DifficultyProfile> = {
     cliffFracVar: 0.07,
     snowLine: 0.82,
     snowMax: 0.35,
-    climb: { density: 0.24, reach: 2.7, hardRatio: 0.2, deadEndRatio: 0.1, restRatio: 0.24 },
+    climb: { reach: 2.7, grades: { easy: 0.40, medium: 0.37, hard: 0.17, impossible: 0.06 }, restRatio: 0.24 },
     ropes: 1,
     fatigueScale: 0.7,
   },
@@ -108,7 +104,7 @@ const PROFILES: Record<DifficultyLevel, DifficultyProfile> = {
     cliffFracVar: 0.07,
     snowLine: 0.62,
     snowMax: 0.7,
-    climb: { density: 0.227, reach: 2.8, hardRatio: 0.32, deadEndRatio: 0.16, restRatio: 0.18 },
+    climb: { reach: 2.8, grades: { easy: 0.29, medium: 0.34, hard: 0.26, impossible: 0.11 }, restRatio: 0.18 },
     ropes: 2,
     fatigueScale: 1.0,
   },
@@ -126,7 +122,7 @@ const PROFILES: Record<DifficultyLevel, DifficultyProfile> = {
     cliffFracVar: 0.06,
     snowLine: 0.45,
     snowMax: 1.05,
-    climb: { density: 0.21, reach: 2.9, hardRatio: 0.44, deadEndRatio: 0.22, restRatio: 0.13 },
+    climb: { reach: 2.9, grades: { easy: 0.21, medium: 0.31, hard: 0.32, impossible: 0.16 }, restRatio: 0.13 },
     ropes: 3,
     fatigueScale: 1.35,
   },
@@ -144,7 +140,7 @@ const PROFILES: Record<DifficultyLevel, DifficultyProfile> = {
     cliffFracVar: 0.05,
     snowLine: 0.3,
     snowMax: 1.4,
-    climb: { density: 0.198, reach: 3.0, hardRatio: 0.55, deadEndRatio: 0.28, restRatio: 0.1 },
+    climb: { reach: 3.0, grades: { easy: 0.15, medium: 0.27, hard: 0.36, impossible: 0.22 }, restRatio: 0.1 },
     ropes: 4,
     fatigueScale: 1.75,
   },

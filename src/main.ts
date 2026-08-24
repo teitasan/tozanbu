@@ -8,13 +8,13 @@ import './style.css';
 import { CameraRig } from './core/CameraRig';
 import { Input } from './core/Input';
 import { clamp01 } from './core/math';
-import { CLIMB, STAMINA, type PlayerAction } from './core/types';
+import { STAMINA, type PlayerAction } from './core/types';
 import { difficultyProfile } from './mountain/difficulty';
 import { Mountain, newRecord, type MountainRecord } from './mountain/Mountain';
 import { MountainRegistry } from './mountain/MountainRegistry';
 import { checkReachability } from './mountain/reachability';
 import type { ClimbWall } from './mountain/cliff/ClimbWall';
-import type { Hold } from './mountain/cliff/Hold';
+import { passable, type Cell } from './mountain/cliff/grid';
 import { NetClient } from './net/NetClient';
 import { RemotePlayers } from './net/RemotePlayers';
 import { ClimbingController } from './player/ClimbingController';
@@ -26,8 +26,6 @@ import { TitleScreen, type StartConfig } from './ui/TitleScreen';
 
 type GameState = 'title' | 'loading' | 'playing' | 'summit';
 
-const CENTER = new THREE.Vector2(0, 0);
-const AIM = new THREE.Vector2(0, 0);
 const _proj = new THREE.Vector3();
 
 class Game {
@@ -40,7 +38,6 @@ class Game {
   private readonly title: TitleScreen;
 
   private readonly sun: THREE.DirectionalLight;
-  private readonly raycaster = new THREE.Raycaster();
 
   private state: GameState = 'title';
   mountain: Mountain | null = null;
@@ -55,7 +52,7 @@ class Game {
   readonly remotes = new RemotePlayers();
   private trailSyncTimer = 0;
 
-  private hovered: Hold | null = null;
+  private hovered: Cell | null = null;
   private wallScanTimer = 0;
   /** 正面にある岩壁 (ヒント表示と取り付き判定で共用) */
   private nearWall: ClimbWall | null = null;
@@ -428,7 +425,7 @@ class Game {
     return null;
   }
 
-  /** 照準の先にあるホールド */
+  /** 照準の先にあるセル */
   private updateAim(): void {
     const mountain = this.mountain;
     if (!mountain) {
@@ -436,98 +433,67 @@ class Game {
       return;
     }
 
-    // 見上げ視点ではホールドが小さく重なるので、レイキャストではなく
-    // 「カーソルにいちばん近いホールド」を拾う。狙いやすさを優先する
+    // グリッドは見せないので、レイキャストではなく
+    // 「カーソルにいちばん近いセル」を拾う。岩肌を見て指す操作にする
     if (this.climb.isPlanning && this.climb.wall) {
-      this.hovered = this.pickNearestHold(this.climb.wall.holds);
+      this.hovered = this.pickNearestCell(this.climb.wall.cells);
       this.describeAim();
       return;
     }
-
-    const targets: THREE.Object3D[] = [];
-    if (this.climb.wall) targets.push(...this.climb.wall.pickTargets);
-    else for (const w of mountain.walls.active) targets.push(...w.pickTargets);
-    if (targets.length === 0) {
-      this.hovered = null;
-      this.hud.setAim(null);
-      return;
-    }
-
-    if (this.input.mode === 'pointerlock') AIM.copy(CENTER);
-    else AIM.set(this.input.cursor.x, this.input.cursor.y);
-    this.raycaster.setFromCamera(AIM, this.rig.camera);
-    // 見上げ視点では壁全体が入るまでカメラを引くので、その分まで届かせる
-    this.raycaster.far = this.climb.isClimbing ? 200 : 40;
-    const hits = this.raycaster.intersectObjects(targets, false);
-    const id = hits.length ? (hits[0].object.userData.holdId as string) : null;
-    let hold: Hold | null = null;
-    if (id) {
-      for (const w of mountain.walls.active) {
-        const h = w.getHold(id);
-        if (h) {
-          hold = h;
-          break;
-        }
-      }
-    }
-    this.hovered = hold;
-    this.describeAim();
+    this.hovered = null;
+    this.hud.setAim(null);
   }
 
-  /** カーソルにいちばん近いホールドを拾う (画面上の距離で判定) */
-  private pickNearestHold(holds: Hold[]): Hold | null {
+  /** カーソルにいちばん近いセルを拾う (画面上の距離で判定) */
+  private pickNearestCell(cells: Cell[]): Cell | null {
     const canvas = this.renderer.domElement;
     const w = Math.max(1, canvas.clientWidth || window.innerWidth);
     const h = Math.max(1, canvas.clientHeight || window.innerHeight);
     const cx = this.input.mode === 'pointerlock' ? 0 : this.input.cursor.x;
     const cy = this.input.mode === 'pointerlock' ? 0 : this.input.cursor.y;
-    let best: Hold | null = null;
+    let best: Cell | null = null;
     let bestScore = Infinity;
-    for (const hold of holds) {
-      _proj.copy(hold.position).project(this.rig.camera);
+    for (const cell of cells) {
+      if (!cell.pos) continue;
+      _proj.copy(cell.pos).project(this.rig.camera);
       if (_proj.z > 1) continue;
       const dx = ((_proj.x - cx) * w) / 2;
       const dy = ((_proj.y - cy) * h) / 2;
       const dist = Math.hypot(dx, dy);
-      if (dist > 34) continue;
-      // 繋げられる手を優先して拾う
-      const score = dist + (this.climb.canAppend(hold) ? 0 : 14);
+      if (dist > 40) continue;
+      // 繋げられるセルを優先して拾う
+      const score = dist + (this.climb.canAppend(cell) ? 0 : 16);
       if (score < bestScore) {
         bestScore = score;
-        best = hold;
+        best = cell;
       }
     }
     return best;
   }
 
-  /** 照準に入っているホールドの説明 */
+  /** 照準に入っているセルの説明 */
   private describeAim(): void {
-    const hold = this.hovered;
-    if (!hold) {
+    const cell = this.hovered;
+    if (!cell || !this.climb.isPlanning) {
       this.hud.setAim(null);
       return;
     }
-    if (!this.climb.isClimbing) {
-      const d = hold.position.distanceTo(this.player.position);
-      const near = hold.ground && d < CLIMB.grabRange + 1.4;
-      this.hud.setAim({ text: near ? 'ここから取り付ける' : `${hold.type} ホールド`, state: near ? 'ok' : 'warn' });
+    if (!passable(cell)) {
+      this.hud.setAim({ text: '手がかりが無い', state: 'ng' });
       return;
     }
-    if (!this.climb.isPlanning) {
-      this.hud.setAim(null);
-      return;
-    }
-    if (!this.climb.canAppend(hold)) {
+    if (!this.climb.canAppend(cell)) {
       this.hud.setAim({
-        text: this.climb.plan.some((s) => s.hold === hold) ? 'ルートに入っている' : '手が届かない',
+        text: this.climb.plan.some((s) => s.cell === cell) ? 'ルートに入っている' : '手が届かない',
         state: 'ng',
       });
       return;
     }
-    const cost = this.climb.costTo(hold);
-    const after = this.climb.projectedStaminaAt(hold);
+    const cost = this.climb.costTo(cell);
+    const after = this.climb.projectedStaminaAt(cell);
+    const rest = cell.rest ? '（岩棚）' : '';
     if (after <= 0) this.hud.setAim({ text: `消費 ${cost.toFixed(0)} — ここで力尽きる`, state: 'ng' });
-    else this.hud.setAim({ text: `消費 ${cost.toFixed(0)} → 残り ${Math.round(after)}`, state: 'ok' });
+    else this.hud.setAim({ text: `消費 ${cost.toFixed(0)} → 残り ${Math.round(after)}${rest}`, state: 'ok' });
   }
 
   private handleActions(): void {

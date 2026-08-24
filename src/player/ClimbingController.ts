@@ -1,48 +1,42 @@
 /* ===========================================================
-   登攀。このゲームの主要なルート選択要素。
+   登攀。岩肌を見てルートを見つける。
 
    流れは「見て決める → 実行する」の2段階。
      1. 岩壁に取り付くと、下から見上げる視点になる (planning)
-     2. ホールドを順にクリックしてルートを組み立てる。
-        1手ごとの消費と残りスタミナの見込みが出る
-     3. Space で実行 (executing)。あとは自動で登る
+     2. 岩肌を観察し、通るセルを順に指定してルートを組み立てる
+     3. Space で実行 (executing)。指定したルートを自動で登る
      4. 登り切れば抜けられる。スタミナが尽きれば落ちる
 
-   岩棚 (ledge) はスタミナが戻る場所であり、そこで一度ルートを組み直せる。
-   長い壁は「岩棚まで1ピッチ、そこからもう1ピッチ」と刻むことになる。
+   グリッドはプレイヤーに見せない。判断材料は岩肌の見た目と、
+   指したセルの消費・残りスタミナだけ。
 
-   正解ルートは表示しない。示すのは「そこへ手が届くか」と「いくら掛かるか」だけ。
+   岩棚はスタミナが戻る場所であり、そこで一度ルートを組み直せる。
+   手足や個々のホールド位置はここでは扱わない。
    =========================================================== */
 
 import * as THREE from 'three';
 import { CLIMB, type PlayerAction } from '../core/types';
 import type { ClimbWall } from '../mountain/cliff/ClimbWall';
-import type { Hold } from '../mountain/cliff/Hold';
-import { moveCost } from '../mountain/cliff/routeSolver';
+import { cellMoveCost, passable, type Cell } from '../mountain/cliff/grid';
 import type { RopeSystem } from '../systems/RopeSystem';
 import type { StaminaSystem } from '../systems/StaminaSystem';
 import type { PlayerController } from './PlayerController';
 
 export type ClimbMode = 'off' | 'planning' | 'executing';
 export type ReleaseReason = 'stepdown' | 'letgo' | 'stamina' | 'topout' | 'stranded';
-
-/** ルートの終わり方 */
 export type PlanEnding = 'top' | 'ledge' | 'air';
 
 export interface PlanStep {
-  hold: Hold;
-  /** この手の消費 */
+  cell: Cell;
   cost: number;
   /** この手を終えた時点の残りスタミナ (岩棚での回復込み) */
   staminaAfter: number;
-  /** ここで休む (岩棚) */
   rest: boolean;
 }
 
 export interface PlanSummary {
   steps: number;
   totalCost: number;
-  /** 登り終えた時点の残りスタミナ */
   endStamina: number;
   /** 力尽きる手の番号 (1始まり)。落ちないなら 0 */
   failsAt: number;
@@ -50,14 +44,12 @@ export interface PlanSummary {
   useRope: boolean;
 }
 
-function anchorFor(hold: Hold, out = new THREE.Vector3()): THREE.Vector3 {
-  const nx = hold.normal.x;
-  const nz = hold.normal.z;
-  const len = Math.hypot(nx, nz) || 1;
-  if (hold.type === 'ledge') {
-    return out.set(hold.position.x + (nx / len) * 0.34, hold.position.y + 0.12, hold.position.z + (nz / len) * 0.34);
-  }
-  return out.set(hold.position.x + (nx / len) * 0.42, hold.position.y - 0.95, hold.position.z + (nz / len) * 0.42);
+/** そのセルに取り付いているときのプレイヤーの位置 */
+function anchorFor(wall: ClimbWall, cell: Cell, out = new THREE.Vector3()): THREE.Vector3 {
+  const n = wall.frame.outward;
+  const p = cell.pos!;
+  if (cell.rest) return out.set(p.x + n.x * 0.34, p.y + 0.12, p.z + n.z * 0.34);
+  return out.set(p.x + n.x * 0.42, p.y - 0.75, p.z + n.z * 0.42);
 }
 
 const smoothstep = (t: number) => t * t * (3 - 2 * t);
@@ -67,17 +59,13 @@ export class ClimbingController {
   wall: ClimbWall | null = null;
   action: PlayerAction = 'CLIMB';
 
-  /** 組み立て中のルート */
   readonly plan: PlanStep[] = [];
-  /** 出発点。地上から取り付くなら null、岩棚から続けるならそのホールド */
-  planStart: Hold | null = null;
-  /** このピッチでロープを使うか */
+  /** 出発点。地上から取り付くなら null、岩棚から続けるならそのセル */
+  planStart: Cell | null = null;
   useRope = false;
-
-  /** 検証用 */
   moveCount = 0;
 
-  onEnterPlanning: ((wall: ClimbWall, from: Hold | null) => void) | null = null;
+  onEnterPlanning: ((wall: ClimbWall, from: Cell | null) => void) | null = null;
   onCommit: ((summary: PlanSummary) => void) | null = null;
   onExit: ((reason: ReleaseReason) => void) | null = null;
   onNotice: ((message: string) => void) | null = null;
@@ -85,7 +73,7 @@ export class ClimbingController {
 
   readonly helpers = new THREE.Group();
 
-  private current: Hold | null = null;
+  private current: Cell | null = null;
   private execIndex = 0;
   private elapsed = 0;
   private duration = 0;
@@ -94,29 +82,15 @@ export class ClimbingController {
   private readonly toPos = new THREE.Vector3();
   private readonly basePos = new THREE.Vector3();
 
-  private readonly reachSphere: THREE.Mesh;
   private readonly routeLine: THREE.Line;
   private readonly routeGeometry: THREE.BufferGeometry;
-  private static readonly ROUTE_MAX = 64;
+  private static readonly ROUTE_MAX = 80;
 
   constructor(
     private readonly player: PlayerController,
     private readonly stamina: StaminaSystem,
     private readonly ropes: RopeSystem,
   ) {
-    this.reachSphere = new THREE.Mesh(
-      new THREE.SphereGeometry(1, 20, 14),
-      new THREE.MeshBasicMaterial({
-        color: 0x8fd8ff,
-        transparent: true,
-        opacity: 0.06,
-        depthWrite: false,
-        side: THREE.BackSide,
-      }),
-    );
-    this.reachSphere.visible = false;
-    this.helpers.add(this.reachSphere);
-
     this.routeGeometry = new THREE.BufferGeometry();
     this.routeGeometry.setAttribute(
       'position',
@@ -141,7 +115,7 @@ export class ClimbingController {
     return this.mode === 'planning';
   }
 
-  get currentHold(): Hold | null {
+  get currentCell(): Cell | null {
     return this.current;
   }
 
@@ -149,34 +123,31 @@ export class ClimbingController {
     return this.wall?.reach ?? CLIMB.grabRange;
   }
 
-  /** ロープによるコスト倍率 */
   get costScale(): number {
     if (!this.wall) return 1;
     if (this.ropes.hasRope(this.wall.id)) return CLIMB.ropeCostScale;
     return this.useRope ? CLIMB.ropeCostScale : 1;
   }
 
-  /** ルートの先端 (次にどこへ手を伸ばせるかの基準) */
-  get tip(): Hold | null {
-    return this.plan.length ? this.plan[this.plan.length - 1].hold : this.planStart;
+  /** ルートの先端 */
+  get tip(): Cell | null {
+    return this.plan.length ? this.plan[this.plan.length - 1].cell : this.planStart;
   }
 
   // --- 取り付き -----------------------------------------------------------
 
-  /** 岩壁を見上げてルートを組み立て始める */
-  startPlanning(wall: ClimbWall, from: Hold | null, playerPos: THREE.Vector3): boolean {
+  startPlanning(wall: ClimbWall, from: Cell | null, playerPos: THREE.Vector3): boolean {
     if (this.mode !== 'off') return false;
     if (this.stamina.stamina <= 1) {
       this.onNotice?.('スタミナが尽きている');
       return false;
     }
     if (!from) {
-      // 地上から取り付けるホールドが近くにあるか
-      const reachable = wall.startHolds.some(
-        (h) => h.position.distanceTo(playerPos) <= CLIMB.grabRange + 2.0,
+      const reachable = wall.groundCells.some(
+        (c) => c.pos!.distanceTo(playerPos) <= CLIMB.grabRange + 2.0,
       );
       if (!reachable) {
-        this.onNotice?.('取り付ける手がかりが見つからない');
+        this.onNotice?.('取り付ける場所が見つからない');
         return false;
       }
     }
@@ -190,42 +161,40 @@ export class ClimbingController {
     this.action = 'REST';
     this.player.enabled = false;
     this.player.velocity.set(0, 0, 0);
-    if (from) this.player.setPosition(anchorFor(from));
+    if (from) this.player.setPosition(anchorFor(wall, from));
     this.basePos.copy(this.player.position);
-    this.reachSphere.scale.setScalar(wall.reach);
+    wall.clearMarkers();
     this.onEnterPlanning?.(wall, from);
     return true;
   }
 
   // --- ルートの組み立て ---------------------------------------------------
 
-  /** その手を足せるか */
-  canAppend(hold: Hold): boolean {
+  canAppend(cell: Cell): boolean {
     if (this.mode !== 'planning' || !this.wall) return false;
-    if (this.plan.some((s) => s.hold === hold)) return false;
+    if (!passable(cell)) return false;
+    if (this.plan.some((s) => s.cell === cell)) return false;
     const tip = this.tip;
-    if (!tip) {
-      // 地上からの1手目は取り付けるホールドだけ
-      return hold.ground;
-    }
-    return hold !== tip && tip.position.distanceTo(hold.position) <= this.reach;
+    if (!tip) return cell.ground;
+    return cell !== tip && tip.pos!.distanceTo(cell.pos!) <= this.reach;
   }
 
-  /** その手の消費 */
-  costTo(hold: Hold): number {
+  costTo(cell: Cell): number {
     const tip = this.tip;
-    if (!tip) return hold.baseStaminaCost * this.costScale;
-    return moveCost(tip, hold, CLIMB.distanceCost, this.costScale);
+    if (!passable(cell)) return Infinity;
+    if (!tip) return cellMoveCost(cell, cell, 0, this.costScale);
+    return cellMoveCost(tip, cell, CLIMB.distanceCost, this.costScale);
   }
 
-  append(hold: Hold): boolean {
-    if (!this.canAppend(hold)) {
-      if (this.plan.some((s) => s.hold === hold)) this.onNotice?.('すでにルートに入っている');
-      else if (!this.tip) this.onNotice?.('地上から取り付けるホールドを選ぶ');
+  append(cell: Cell): boolean {
+    if (!this.canAppend(cell)) {
+      if (!passable(cell)) this.onNotice?.('そこは手がかりが無い');
+      else if (this.plan.some((s) => s.cell === cell)) this.onNotice?.('すでにルートに入っている');
+      else if (!this.tip) this.onNotice?.('地上から取り付ける場所を選ぶ');
       else this.onNotice?.('そこまでは手が届かない');
       return false;
     }
-    this.plan.push({ hold, cost: 0, staminaAfter: 0, rest: false });
+    this.plan.push({ cell, cost: 0, staminaAfter: 0, rest: false });
     this.recalculate();
     return true;
   }
@@ -257,27 +226,25 @@ export class ClimbingController {
     this.onNotice?.(this.useRope ? `ロープを使う (残り ${this.ropes.carried})` : 'ロープを使わない');
   }
 
-  /** 各手の消費と残りスタミナの見込みを計算し直す */
   private recalculate(): void {
     let cur = this.stamina.stamina;
     let prev = this.planStart;
     const scale = this.costScale;
     for (const step of this.plan) {
       const cost = prev
-        ? moveCost(prev, step.hold, CLIMB.distanceCost, scale)
-        : step.hold.baseStaminaCost * scale;
+        ? cellMoveCost(prev, step.cell, CLIMB.distanceCost, scale)
+        : cellMoveCost(step.cell, step.cell, 0, scale);
       step.cost = cost;
       cur -= cost;
-      // 岩棚に着いたら最大まで戻る
-      step.rest = step.hold.type === 'ledge' && cur > 0;
+      step.rest = step.cell.rest && cur > 0;
       if (step.rest) cur = this.stamina.maxStamina;
       step.staminaAfter = cur;
-      prev = step.hold;
+      prev = step.cell;
     }
     this.updateRouteLine();
+    this.wall?.markRoute(this.plan.map((s) => s.cell));
   }
 
-  /** ルート全体の見込み */
   summary(): PlanSummary {
     let failsAt = 0;
     for (let i = 0; i < this.plan.length; i++) {
@@ -286,11 +253,11 @@ export class ClimbingController {
         break;
       }
     }
-    const last = this.plan.length ? this.plan[this.plan.length - 1].hold : null;
+    const last = this.plan.length ? this.plan[this.plan.length - 1].cell : null;
     let ending: PlanEnding = 'air';
     if (last) {
       if (last.topOut && this.wall?.topOutPoint(last)) ending = 'top';
-      else if (last.type === 'ledge') ending = 'ledge';
+      else if (last.rest) ending = 'ledge';
     }
     return {
       steps: this.plan.length,
@@ -302,9 +269,14 @@ export class ClimbingController {
     };
   }
 
+  /** そのセルを足したときの残りスタミナ見込み */
+  projectedStaminaAt(cell: Cell): number {
+    const base = this.plan.length ? this.plan[this.plan.length - 1].staminaAfter : this.stamina.stamina;
+    return base - this.costTo(cell);
+  }
+
   // --- 実行 ---------------------------------------------------------------
 
-  /** 組み立てたルートを登り始める */
   commit(): boolean {
     if (this.mode !== 'planning' || !this.wall) return false;
     if (this.plan.length === 0) {
@@ -323,19 +295,18 @@ export class ClimbingController {
     this.restTimer = 0;
     this.moveCount = 0;
     this.action = 'CLIMB';
+    this.wall.setHover(null);
     if (!this.planStart) this.player.setPosition(this.basePos);
     this.beginStep();
     this.onCommit?.(summary);
     return true;
   }
 
-  /** 組み立てをやめて壁から離れる */
   cancel(): void {
     if (this.mode !== 'planning') return;
     this.finish('stepdown');
   }
 
-  /** 手を放す (実行中の中断) */
   letGo(): void {
     if (this.mode === 'planning') {
       this.cancel();
@@ -347,41 +318,39 @@ export class ClimbingController {
 
   private beginStep(): void {
     const step = this.plan[this.execIndex];
-    if (!step) return;
+    if (!step || !this.wall) return;
     const from = this.current;
     const cost = from
-      ? moveCost(from, step.hold, CLIMB.distanceCost, this.costScale)
-      : step.hold.baseStaminaCost * this.costScale;
+      ? cellMoveCost(from, step.cell, CLIMB.distanceCost, this.costScale)
+      : cellMoveCost(step.cell, step.cell, 0, this.costScale);
 
     if (!this.stamina.canAfford(cost)) {
-      // この一手が出せない
       this.finish('stamina');
       return;
     }
     this.stamina.consume(cost);
 
-    const dist = from ? from.position.distanceTo(step.hold.position) : 1.5;
-    const dy = from ? step.hold.position.y - from.position.y : 1.5;
+    const dist = from ? from.pos!.distanceTo(step.cell.pos!) : 1.5;
+    const dy = from ? step.cell.pos!.y - from.pos!.y : 1.5;
     this.action = Math.abs(dy) / Math.max(0.01, dist) < CLIMB.traverseSlope ? 'TRAVERSE' : 'CLIMB';
     this.elapsed = 0;
     this.duration = CLIMB.moveBaseDuration + dist * CLIMB.moveDurationPerUnit;
     this.fromPos.copy(this.player.position);
-    anchorFor(step.hold, this.toPos);
+    anchorFor(this.wall, step.cell, this.toPos);
   }
 
   private arriveStep(): void {
     const step = this.plan[this.execIndex];
-    this.current = step.hold;
+    this.current = step.cell;
     this.moveCount += 1;
-    anchorFor(step.hold, this.toPos);
+    anchorFor(this.wall!, step.cell, this.toPos);
     this.player.position.copy(this.toPos);
 
     if (this.stamina.stamina <= 0) {
       this.finish('stamina');
       return;
     }
-
-    if (step.hold.type === 'ledge') {
+    if (step.cell.rest) {
       // 岩棚に乗った。息を整える
       this.restTimer = Math.max(0, (this.stamina.maxStamina - this.stamina.stamina) / CLIMB.ledgeRecoveryPerSec);
       this.action = 'REST';
@@ -390,42 +359,31 @@ export class ClimbingController {
     this.advance();
   }
 
-  /** 次の手へ、または終了処理へ */
   private advance(): void {
     if (this.execIndex < this.plan.length - 1) {
       this.execIndex += 1;
       this.beginStep();
       return;
     }
-    // ルートの終端に着いた
     const last = this.current;
     if (last?.topOut && this.wall?.topOutPoint(last)) {
       this.topOut();
       return;
     }
-    if (last?.type === 'ledge') {
-      // 岩棚。ここでもう一度ルートを組み直す
+    if (last?.rest) {
       const wall = this.wall!;
       this.mode = 'off';
       this.startPlanning(wall, last, this.player.position);
       this.onNotice?.('岩棚に着いた。ここから次のルートを組み立てる');
       return;
     }
-    // 抜け口でも岩棚でもない場所で手が尽きた
     this.finish('stranded');
   }
 
   private topOut(): void {
     const wall = this.wall!;
     const point = wall.topOutPoint(this.current!);
-    this.clearVisuals();
-    this.mode = 'off';
-    this.wall = null;
-    this.current = null;
-    this.plan.length = 0;
-    this.planStart = null;
-    this.reachSphere.visible = false;
-    this.routeLine.visible = false;
+    this.reset(wall);
     this.player.enabled = true;
     if (!point || !this.player.beginMantle(point, this.stamina)) {
       this.player.grounded = false;
@@ -439,15 +397,7 @@ export class ClimbingController {
 
   private finish(reason: ReleaseReason): void {
     const wall = this.wall;
-    this.clearVisuals();
-    this.mode = 'off';
-    this.wall = null;
-    this.current = null;
-    this.plan.length = 0;
-    this.planStart = null;
-    this.useRope = false;
-    this.reachSphere.visible = false;
-    this.routeLine.visible = false;
+    this.reset(wall);
     this.player.enabled = true;
     if (reason === 'stepdown') {
       this.player.velocity.set(0, 0, 0);
@@ -460,28 +410,30 @@ export class ClimbingController {
     this.onExit?.(reason);
   }
 
+  private reset(wall: ClimbWall | null): void {
+    wall?.clearMarkers();
+    this.mode = 'off';
+    this.wall = null;
+    this.current = null;
+    this.plan.length = 0;
+    this.planStart = null;
+    this.useRope = false;
+    this.routeLine.visible = false;
+    this.routeGeometry.setDrawRange(0, 0);
+  }
+
   // --- 更新 ---------------------------------------------------------------
 
-  update(dt: number, hovered: Hold | null): void {
+  update(dt: number, hovered: Cell | null): void {
     if (this.mode === 'off' || !this.wall) return;
 
     if (this.mode === 'planning') {
       this.stamina.exertion = 0.1;
       this.action = 'REST';
-      if (this.current) {
-        this.reachSphere.position.copy(this.tip?.position ?? this.current.position);
-        this.reachSphere.visible = true;
-      } else if (this.tip) {
-        this.reachSphere.position.copy(this.tip.position);
-        this.reachSphere.visible = true;
-      } else {
-        this.reachSphere.visible = false;
-      }
-      this.updatePlanVisuals(hovered);
+      this.wall.setHover(hovered && this.canAppend(hovered) ? hovered : null);
       return;
     }
 
-    // --- 実行中 ---
     if (this.restTimer > 0) {
       this.restTimer -= dt;
       this.stamina.recover(CLIMB.ledgeRecoveryPerSec, dt);
@@ -506,72 +458,18 @@ export class ClimbingController {
         this.arriveStep();
       }
     }
-
-    if (this.current) {
-      this.reachSphere.position.copy(this.current.position);
-      this.reachSphere.visible = false;
-    }
-    this.updateExecVisuals();
-  }
-
-  // --- 見た目 -------------------------------------------------------------
-
-  private clearVisuals(): void {
-    if (!this.wall) return;
-    for (const h of this.wall.holds) h.setVisual('idle');
-  }
-
-  private updatePlanVisuals(hovered: Hold | null): void {
-    const wall = this.wall;
-    if (!wall) return;
-    const planned = new Set(this.plan.map((s) => s.hold));
-    const tip = this.tip;
-    for (const h of wall.holds) {
-      if (planned.has(h)) {
-        h.setVisual('planned');
-        continue;
-      }
-      if (h === tip) {
-        h.setVisual('current');
-        continue;
-      }
-      const ok = this.canAppend(h);
-      if (!ok) {
-        h.setVisual('idle');
-        continue;
-      }
-      if (h === hovered) h.setVisual('hover');
-      else if (this.projectedStaminaAt(h) <= 0) h.setVisual('tooExpensive');
-      else h.setVisual('reachable');
-    }
-  }
-
-  /** その手を足したときの残りスタミナ見込み */
-  projectedStaminaAt(hold: Hold): number {
-    const base = this.plan.length ? this.plan[this.plan.length - 1].staminaAfter : this.stamina.stamina;
-    return base - this.costTo(hold);
-  }
-
-  private updateExecVisuals(): void {
-    const wall = this.wall;
-    if (!wall) return;
-    const remaining = new Set(this.plan.slice(this.execIndex).map((s) => s.hold));
-    for (const h of wall.holds) {
-      if (h === this.current) h.setVisual('current');
-      else if (remaining.has(h)) h.setVisual('planned');
-      else h.setVisual('idle');
-    }
   }
 
   private updateRouteLine(): void {
     const attr = this.routeGeometry.attributes.position as THREE.BufferAttribute;
     const pts: THREE.Vector3[] = [];
-    if (this.planStart) pts.push(this.planStart.position);
+    if (this.planStart?.pos) pts.push(this.planStart.pos);
     else if (this.plan.length) pts.push(this.basePos);
-    for (const s of this.plan) pts.push(s.hold.position);
+    for (const s of this.plan) if (s.cell.pos) pts.push(s.cell.pos);
     const count = Math.min(pts.length, ClimbingController.ROUTE_MAX);
+    const n = this.wall?.frame.outward;
     for (let i = 0; i < count; i++) {
-      attr.setXYZ(i, pts[i].x, pts[i].y, pts[i].z + 0.12);
+      attr.setXYZ(i, pts[i].x + (n?.x ?? 0) * 0.2, pts[i].y, pts[i].z + (n?.z ?? 0) * 0.2);
     }
     attr.needsUpdate = true;
     this.routeGeometry.setDrawRange(0, count);
