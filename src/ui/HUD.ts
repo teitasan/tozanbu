@@ -90,9 +90,6 @@ export class HUD {
   private readonly hintEl = el('hint');
   private readonly toastEl = el('toast');
 
-  private readonly loading = el('loading');
-  private readonly loadingTitle = el('loading-title');
-  private readonly loadingBar = el('loading-bar');
 
   private readonly summit = el('summit');
   private readonly summitTitle = el('summit-title');
@@ -232,16 +229,6 @@ export class HUD {
     this.toastEl.className = `toast show${good ? ' good' : ''}`;
     window.clearTimeout(this.toastTimer);
     this.toastTimer = window.setTimeout(() => this.toastEl.classList.remove('show'), 2000);
-  }
-
-  showLoading(label: string, ratio: number): void {
-    this.loading.classList.remove('hidden');
-    this.loadingTitle.textContent = label;
-    this.loadingBar.style.width = `${ratio * 100}%`;
-  }
-
-  hideLoading(): void {
-    this.loading.classList.add('hidden');
   }
 
   showSummit(opts: {

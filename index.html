@@ -60,11 +60,32 @@
       <div id="toast" class="toast"></div>
     </div>
 
-    <!-- ローディング -->
-    <div id="loading" class="overlay hidden">
-      <div class="loading-box">
-        <div class="loading-title" id="loading-title">山を生成中</div>
-        <div class="bar"><div id="loading-bar" class="bar-fill"></div></div>
+    <!-- ブリーフィング (地形図を読む30秒) -->
+    <div id="briefing" class="overlay hidden">
+      <div class="brief-box">
+        <header class="brief-head">
+          <div>
+            <div class="brief-title">BRIEFING</div>
+            <div class="brief-sub" id="brief-mtn">-</div>
+          </div>
+          <div class="brief-timer" id="brief-timer">00:30</div>
+        </header>
+        <div class="brief-map" id="brief-map">
+          <div class="brief-status" id="brief-status">地形図を作成中</div>
+        </div>
+        <footer class="brief-foot">
+          <ul class="brief-legend">
+            <li><i class="lg-contour"></i>等高線<span id="brief-interval"></span></li>
+            <li><i class="lg-cliff"></i>崖</li>
+            <li><i class="lg-peak"></i>山頂</li>
+            <li><i class="lg-start"></i>登山口</li>
+          </ul>
+          <div class="brief-tools">
+            <span class="brief-hint">地図をクリックでピン／ドラッグでルート線</span>
+            <span id="brief-party" class="brief-party"></span>
+            <button id="brief-clear" type="button">自分の書き込みを消す</button>
+          </div>
+        </footer>
       </div>
     </div>
 

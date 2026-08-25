@@ -8,10 +8,12 @@ import './style.css';
 import { CameraRig } from './core/CameraRig';
 import { Input } from './core/Input';
 import { clamp01 } from './core/math';
+import { hashString } from './core/rng';
 import { STAMINA, type PlayerAction } from './core/types';
 import { difficultyProfile } from './mountain/difficulty';
 import { Mountain, newRecord, type MountainRecord } from './mountain/Mountain';
 import { MountainRegistry } from './mountain/MountainRegistry';
+import { TopoMap } from './mountain/TopoMap';
 import { checkReachability } from './mountain/reachability';
 import type { ClimbWall } from './mountain/cliff/ClimbWall';
 import { NetClient } from './net/NetClient';
@@ -20,10 +22,11 @@ import { ClimbingController } from './player/ClimbingController';
 import { PlayerController } from './player/PlayerController';
 import { RopeSystem } from './systems/RopeSystem';
 import { StaminaSystem } from './systems/StaminaSystem';
+import { Briefing } from './ui/Briefing';
 import { HUD, type PartyMember } from './ui/HUD';
 import { TitleScreen, type StartConfig } from './ui/TitleScreen';
 
-type GameState = 'title' | 'loading' | 'playing' | 'summit';
+type GameState = 'title' | 'briefing' | 'playing' | 'summit';
 
 
 class Game {
@@ -32,6 +35,7 @@ class Game {
   private readonly rig: CameraRig;
   private readonly input: Input;
   private readonly hud = new HUD();
+  private readonly briefing = new Briefing();
   private readonly registry = new MountainRegistry();
   private readonly title: TitleScreen;
 
@@ -172,6 +176,10 @@ class Game {
     });
     this.hud.backBtn.addEventListener('click', () => this.returnToTitle());
 
+    // ブリーフィングの書き込みはパーティー全員で共有する
+    this.briefing.onMark = (mark) => this.net.sendMark(mark);
+    this.briefing.onClear = () => this.net.sendUnmark();
+
     this.wireNet();
 
     this.input.onModeChange = () => this.syncReticle();
@@ -180,18 +188,26 @@ class Game {
   /** マルチプレイ。静的な山は同期せず、動的な状態だけを同期する */
   private wireNet(): void {
     this.net.onNotice = (text) => this.hud.toast(text, true);
-    this.net.onWelcome = ({ players, ropes, trail, record }) => {
+    this.net.onWelcome = ({ players, ropes, marks, trail, record }) => {
       for (const p of players) this.remotes.upsert(p);
       this.mountain?.snow.applyRemote(trail);
       this.ropes.applyRemote(ropes, (id) => this.mountain?.walls.get(id));
+      this.briefing.applyMarks(marks);
+      this.syncParty();
       if (record && this.mountain) Object.assign(this.mountain.record, record);
       this.hud.toast(`パーティーに参加した (${players.length + 1}人)`, true);
     };
     this.net.onJoin = (p) => {
       this.remotes.upsert(p);
+      this.syncParty();
       this.hud.toast(`${p.name} が合流した`, true);
     };
-    this.net.onLeave = (id) => this.remotes.remove(id);
+    this.net.onLeave = (id) => {
+      this.remotes.remove(id);
+      this.syncParty();
+    };
+    this.net.onMark = (mark) => this.briefing.applyMark(mark);
+    this.net.onUnmark = (by) => this.briefing.clearBy(by);
     this.net.onState = (p) => this.remotes.upsert(p);
     this.net.onTrail = (cells) => this.mountain?.snow.applyRemote(cells);
     this.net.onRope = (rope) => this.ropes.applyRemote([rope], (id) => this.mountain?.walls.get(id));
@@ -199,6 +215,12 @@ class Game {
       if (this.mountain) Object.assign(this.mountain.record, record);
     };
     this.net.onClose = () => this.remotes.clear();
+  }
+
+  /** ブリーフィングに出すパーティーの顔ぶれ */
+  private syncParty(): void {
+    const names = [this.config?.playerName ?? 'you', ...this.remotes.roster().map((p) => p.name)];
+    this.briefing.setParty(names);
   }
 
   private onResize = (): void => {
@@ -212,11 +234,13 @@ class Game {
   // --- 登山の開始 ---------------------------------------------------------
 
   async begin(cfg: StartConfig): Promise<void> {
-    this.state = 'loading';
+    this.state = 'briefing';
     this.config = cfg;
     this.title.hide();
     this.hud.setVisible(false);
-    this.hud.showLoading('山を生成中', 0.02);
+    // ローディング画面の代わりに地形図を出す。
+    // 生成が早く終わってもブリーフィングは 30 秒続く
+    this.briefing.open('山を生成中', cfg.playerName, hashString(cfg.playerName) % 6);
 
     if (this.mountain) {
       this.scene.remove(this.mountain.group);
@@ -228,7 +252,11 @@ class Game {
       .get(cfg.seed, cfg.difficulty)
       .catch(() => newRecord(cfg.seed, cfg.difficulty));
 
-    const mountain = await Mountain.create(record, (label, ratio) => this.hud.showLoading(label, ratio));
+    const profile0 = difficultyProfile(record.difficulty);
+    this.briefing.setTitle(
+      `${record.name ?? `未踏峰 ${record.id}`} / ${profile0.level}級 ${profile0.label}`,
+    );
+    const mountain = await Mountain.create(record, (label) => this.briefing.setStatus(label));
     this.mountain = mountain;
     this.scene.add(mountain.group);
     // カメラが樹木や転石にめり込まないようにする。
@@ -261,6 +289,10 @@ class Game {
     this.stats = { falls: 0, climbMoves: 0, ropesFixed: 0, maxAltitude: 0 };
     this.elapsed = 0;
 
+    // 地形図。3Dの山と同じ Heightfield から等高線を引く
+    this.briefing.setMap(new TopoMap(mountain.field, mountain.profile));
+    this.briefing.setParty([cfg.playerName]);
+
     const t = mountain.field.trailhead;
     this.player.reset(t.x, t.y, t.z);
     // 山頂の方を向いて開始する
@@ -282,14 +314,21 @@ class Game {
       });
     }
 
-    this.hud.hideLoading();
+    // ここまでが「ローディング」。残りのブリーフィング時間は地図を読む時間
+    await this.briefing.wait();
+    this.briefing.close();
+    if (this.state !== 'briefing') return; // 待っている間にタイトルへ戻された
+
     this.hud.setVisible(true);
     this.state = 'playing';
+    this.prevTime = performance.now();
+    this.syncReticle();
     this.input.requestLock(true);
     this.hud.toast(`${mountain.displayName} / 標高 ${Math.round(mountain.summitHeight)}m`, true);
   }
 
   private returnToTitle(): void {
+    this.briefing.close();
     this.net.close();
     this.remotes.clear();
     this.hud.hideSummit();

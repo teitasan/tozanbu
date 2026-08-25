@@ -11,6 +11,7 @@ import {
   type DurableObjectState,
   type Env,
   type FixedRope,
+  type MapMark,
   type MountainRecord,
 } from './types';
 
@@ -19,6 +20,9 @@ const MAX_PLAYERS = 8;
 const MIN_STATE_MS = 60;
 /** 1メッセージで受け付ける踏み跡セル数 */
 const MAX_TRAIL_CELLS = 4096;
+/** 1人が地図に描ける数と、1本の線の点数 */
+const MAX_MARKS_PER_PLAYER = 24;
+const MAX_MARK_POINTS = 256;
 
 interface Player {
   id: string;
@@ -44,6 +48,8 @@ export class MountainRoom {
   /** 踏み跡: セル index -> 踏み固め度 */
   private readonly trail = new Map<number, number>();
   private readonly ropes = new Map<string, FixedRope>();
+  /** ブリーフィングの書き込み。部屋が空になったら消す */
+  private readonly marks = new Map<string, MapMark>();
   private mountainId: string | null = null;
   private record: MountainRecord | null = null;
   private nextId = 1;
@@ -93,6 +99,12 @@ export class MountainRoom {
       case 'rope':
         this.ropeUpdate(ws, msg);
         break;
+      case 'mark':
+        this.markUpdate(ws, msg);
+        break;
+      case 'unmark':
+        this.markClear(ws);
+        break;
       case 'record':
         this.recordUpdate(ws, msg);
         break;
@@ -133,6 +145,7 @@ export class MountainRoom {
       mountain: this.mountainId,
       players: [...this.players.values()].filter((p) => p !== player).map(publicPlayer),
       ropes: [...this.ropes.values()],
+      marks: [...this.marks.values()],
       trail: flattenTrail(this.trail),
       record: this.record,
     });
@@ -200,6 +213,45 @@ export class MountainRoom {
     this.broadcast({ t: 'notice', text: `${p.name} が登頂した` });
   }
 
+  /**
+   * 地図への書き込み。
+   * 名前は詐称できないよう、サーバが持っているものに差し替える。
+   */
+  private markUpdate(ws: WebSocket, msg: Record<string, unknown>): void {
+    const p = this.players.get(ws);
+    if (!p) return;
+    const raw = msg.m as Partial<MapMark> | undefined;
+    if (!raw || !Array.isArray(raw.pts) || raw.pts.length < 2) return;
+    // 1人あたりの書き込み数を制限する
+    let mine = 0;
+    for (const m of this.marks.values()) if (m.by === p.name) mine++;
+    if (mine >= MAX_MARKS_PER_PLAYER) return;
+
+    const pts: number[] = [];
+    for (let i = 0; i + 1 < raw.pts.length && pts.length < MAX_MARK_POINTS * 2; i += 2) {
+      const u = Number(raw.pts[i]);
+      const v = Number(raw.pts[i + 1]);
+      if (!Number.isFinite(u) || !Number.isFinite(v)) return;
+      pts.push(Math.min(1, Math.max(0, u)), Math.min(1, Math.max(0, v)));
+    }
+    const mark: MapMark = {
+      id: `${p.id}:${sanitizeText(raw.id, 24)}`,
+      by: p.name,
+      hue: Math.max(0, Math.min(63, Math.floor(Number(raw.hue) || 0))),
+      pts,
+    };
+    this.marks.set(mark.id, mark);
+    this.broadcast({ t: 'mark', m: mark }, ws);
+  }
+
+  /** そのプレイヤーの書き込みを全部消す */
+  private markClear(ws: WebSocket): void {
+    const p = this.players.get(ws);
+    if (!p) return;
+    for (const [id, m] of this.marks) if (m.by === p.name) this.marks.delete(id);
+    this.broadcast({ t: 'unmark', by: p.name }, ws);
+  }
+
   private leave(ws: WebSocket): void {
     const p = this.players.get(ws);
     if (!p) return;
@@ -209,6 +261,7 @@ export class MountainRoom {
       // 誰もいなくなったら踏み跡とロープは残さない (山そのものは Seed から再生成される)
       this.trail.clear();
       this.ropes.clear();
+      this.marks.clear();
       this.record = null;
       this.mountainId = null;
     }

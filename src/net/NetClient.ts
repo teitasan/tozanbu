@@ -6,6 +6,7 @@
 
 import type { MountainRecord } from '../mountain/Mountain';
 import type { FixedRope } from '../systems/RopeSystem';
+import type { MapMark } from '../ui/Briefing';
 
 export interface RemoteSnapshot {
   id: string;
@@ -38,6 +39,7 @@ export class NetClient {
   onWelcome: ((data: {
     players: RemoteSnapshot[];
     ropes: FixedRope[];
+    marks: MapMark[];
     trail: number[];
     record: MountainRecord | null;
   }) => void) | null = null;
@@ -45,6 +47,8 @@ export class NetClient {
   onLeave: ((id: string) => void) | null = null;
   onState: ((p: RemoteSnapshot) => void) | null = null;
   onTrail: ((cells: number[]) => void) | null = null;
+  onMark: ((mark: MapMark) => void) | null = null;
+  onUnmark: ((by: string) => void) | null = null;
   onRope: ((rope: FixedRope) => void) | null = null;
   onRecord: ((record: MountainRecord) => void) | null = null;
   onNotice: ((text: string) => void) | null = null;
@@ -93,6 +97,7 @@ export class NetClient {
         this.onWelcome?.({
           players: (msg.players as RemoteSnapshot[]) ?? [],
           ropes: (msg.ropes as FixedRope[]) ?? [],
+          marks: (msg.marks as MapMark[]) ?? [],
           trail: (msg.trail as number[]) ?? [],
           record: (msg.record as MountainRecord | null) ?? null,
         });
@@ -108,6 +113,12 @@ export class NetClient {
         break;
       case 'trail':
         this.onTrail?.((msg.c as number[]) ?? []);
+        break;
+      case 'mark':
+        this.onMark?.(msg.m as MapMark);
+        break;
+      case 'unmark':
+        this.onUnmark?.(String(msg.by));
         break;
       case 'rope':
         this.onRope?.(msg.r as FixedRope);
@@ -132,6 +143,16 @@ export class NetClient {
     if (now - this.lastStateAt < 95) return;
     this.lastStateAt = now;
     this.send({ t: 's', x, y, z, yaw, a, cur, max });
+  }
+
+  /** ブリーフィングで地図に描いたもの */
+  sendMark(mark: MapMark): void {
+    if (this.connected) this.send({ t: 'mark', m: mark });
+  }
+
+  /** 自分の書き込みを全部消す */
+  sendUnmark(): void {
+    if (this.connected) this.send({ t: 'unmark' });
   }
 
   sendTrail(cells: number[]): void {

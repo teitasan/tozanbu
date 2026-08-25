@@ -129,9 +129,6 @@ html, body {
   background: radial-gradient(120% 90% at 50% 0%, #1a2634 0%, #0a0d12 70%);
   z-index: 10; overflow: auto; padding: 24px 12px;
 }
-.loading-box { width: min(420px, 90vw); text-align: center; }
-.loading-title { margin-bottom: 8px; color: var(--muted); letter-spacing: .1em; }
-
 .title-box {
   width: min(560px, 94vw);
   background: rgba(14,19,26,0.86);
@@ -195,3 +192,78 @@ button.primary:hover { background: #3a80e6; }
 .naming { display: grid; gap: 8px; margin-bottom: 12px; }
 .naming label { color: var(--gold); font-size: 12px; }
 .summit-named { color: var(--gold); font-size: 15px; font-weight: 700; margin-bottom: 12px; }
+
+/* --- ブリーフィング (地形図を読む30秒) ------------------------------- */
+#briefing { padding: 16px 12px; }
+.brief-box {
+  width: min(1080px, 96vw);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.brief-head {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 16px;
+}
+.brief-title {
+  font-size: 22px; font-weight: 700; letter-spacing: .34em; color: var(--text);
+}
+.brief-sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+.brief-timer {
+  font-size: 40px; font-weight: 700; letter-spacing: .06em;
+  font-variant-numeric: tabular-nums; color: var(--text); line-height: 1;
+}
+.brief-timer.urgent { color: var(--danger); }
+
+.brief-map {
+  position: relative;
+  width: min(72vh, 100%);
+  aspect-ratio: 1 / 1;
+  margin: 0 auto;
+  align-self: center;
+  border: 1px solid rgba(255,255,255,0.18);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #efe9dc;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+}
+.brief-topo, .brief-ink {
+  position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+}
+.brief-ink { cursor: crosshair; touch-action: none; }
+.brief-status {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  color: #6b5c48; letter-spacing: .12em; background: #efe9dc;
+}
+
+.brief-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap;
+}
+.brief-legend {
+  display: flex; gap: 14px; flex-wrap: wrap;
+  margin: 0; padding: 0; list-style: none; color: var(--muted); font-size: 12px;
+}
+.brief-legend li { display: flex; align-items: center; gap: 5px; }
+.brief-legend i { width: 14px; height: 12px; display: inline-block; }
+.lg-contour { border-top: 2px solid #a98a5e; }
+.lg-cliff {
+  background: repeating-linear-gradient(-45deg, #8a705a 0 1px, transparent 1px 4px);
+}
+.lg-peak {
+  width: 0 !important; height: 0 !important;
+  border-left: 6px solid transparent; border-right: 6px solid transparent;
+  border-bottom: 10px solid #cbb79a;
+}
+.lg-start {
+  width: 10px !important; height: 10px !important;
+  border-radius: 50%; background: #c8442e;
+}
+.brief-tools { display: flex; align-items: center; gap: 12px; font-size: 12px; }
+.brief-hint { color: var(--muted); }
+.brief-party { color: var(--text); }
+#brief-clear {
+  background: rgba(255,255,255,0.08); color: var(--text);
+  border: 1px solid var(--panel-border); border-radius: 5px;
+  padding: 5px 10px; font: inherit; font-size: 12px; cursor: pointer;
+}
+#brief-clear:hover { background: rgba(255,255,255,0.16); }

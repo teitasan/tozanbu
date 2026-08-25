@@ -174,6 +174,16 @@ async function main() {
   const rope = await b.wait((m) => m.t === 'rope');
   check('ロープが共有される', rope.r.wallId === 'w1_2' && rope.r.by === 'あさひ');
 
+  // ブリーフィングの書き込み
+  a.send({ t: 'mark', m: { id: '7', hue: 2, by: 'なりすまし', pts: [0.5, 0.4, 0.6, 0.45] } });
+  const mark = await b.wait((m) => m.t === 'mark');
+  check('地図の書き込みが共有される', mark.m.pts.length === 4 && mark.m.hue === 2);
+  check('書き込みの名前はサーバが入れる', mark.m.by === 'あさひ', `by=${mark.m.by}`);
+
+  a.send({ t: 'mark', m: { id: '8', hue: 2, by: 'x', pts: [3.5, -2, 0.5, 0.5] } });
+  const clamped = await b.wait((m) => m.t === 'mark' && m.m.id.endsWith(':8'));
+  check('地図の外へは描けない', clamped.m.pts[0] === 1 && clamped.m.pts[1] === 0);
+
   // 後から入った人が踏み跡とロープを受け取れるか
   const c = client(url);
   await c.open();
@@ -181,7 +191,12 @@ async function main() {
   const welcomeC = await c.wait((m) => m.t === 'welcome');
   check('後続が踏み跡を受け取る', welcomeC.trail.length === 4, `trail=${welcomeC.trail.length}`);
   check('後続がロープを受け取る', welcomeC.ropes.length === 1);
+  check('後続が地図の書き込みを受け取る', welcomeC.marks.length === 2, `marks=${welcomeC.marks?.length}`);
   check('後続が全員を受け取る', welcomeC.players.length === 2);
+
+  a.send({ t: 'unmark' });
+  const unmark = await b.wait((m) => m.t === 'unmark');
+  check('書き込みの消去が共有される', unmark.by === 'あさひ');
 
   a.send({ t: 'record', record: { id, seed, difficulty: 3, name: '試験岳', ascents: 3, firstAscentBy: 'あさひ', firstAscentParty: ['あさひ'], firstAscentAt: firstAt } });
   const rec = await b.wait((m) => m.t === 'record');

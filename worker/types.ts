@@ -23,6 +23,14 @@ export interface MountainRecord {
   ascents: number;
 }
 
+/** ブリーフィングで地図に描いたピン／ルート線。座標は地図の正規化座標 */
+export interface MapMark {
+  id: string;
+  by: string;
+  hue: number;
+  pts: number[];
+}
+
 export interface FixedRope {
   wallId: string;
   by: string;
