@@ -12,6 +12,8 @@ import { MOVE } from './types';
 import type { Heightfield } from '../mountain/Heightfield';
 
 const LOOK_SENS = 0.0022;
+/** 登攀中に画面の中心へ置く高さ (足元から)。掴んでいるセルの高さに合わせる */
+const CLIMB_FOCUS = 1.15;
 
 export class CameraRig {
   readonly camera: THREE.PerspectiveCamera;
@@ -66,15 +68,18 @@ export class CameraRig {
     if (input.zoomDelta) {
       this.zoom = THREE.MathUtils.clamp(this.zoom + input.zoomDelta * 0.6, -1.5, 6);
     }
-    this.targetDistance = (climbing ? 6.2 : 5.4) + this.zoom;
-    // 登攀中は肩越しの量を増やす。次に取る岩肌が身体で隠れないように
-    const wantLateral = climbing ? 1.5 : 0.9;
+    this.targetDistance = (climbing ? 6.9 : 5.4) + this.zoom;
+    // 登攀中は肩越しをほぼ切る。方向キーで八方を選ぶので、
+    // 自分を画面の中心に置いて上下左右を同じだけ見せる
+    const wantLateral = climbing ? 0.5 : 0.9;
     this.distance = damp(this.distance, this.targetDistance, 4, dt);
     this.lateral = damp(this.lateral, wantLateral, 4, dt);
 
     const cp = Math.cos(this.pitch);
     const sp = Math.sin(this.pitch);
-    this.focus.set(target.x, target.y + MOVE.eyeHeight, target.z);
+    // 登攀中は目線ではなく「掴んでいる高さ」を中心にする。
+    // 目線を中心にすると、下へ手を伸ばす先が画面の外に出てしまう
+    this.focus.set(target.x, target.y + (climbing ? CLIMB_FOCUS : MOVE.eyeHeight), target.z);
 
     // 照準方向 (プレイヤーが見ている向き)
     this.aim.set(-Math.sin(this.yaw) * cp, -sp, -Math.cos(this.yaw) * cp);
@@ -83,7 +88,7 @@ export class CameraRig {
 
     this.desired.set(
       this.focus.x - this.aim.x * this.distance + rightX * this.lateral,
-      this.focus.y - this.aim.y * this.distance + 0.25,
+      this.focus.y - this.aim.y * this.distance + (climbing ? 0 : 0.25),
       this.focus.z - this.aim.z * this.distance + rightZ * this.lateral,
     );
 

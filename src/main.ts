@@ -51,6 +51,8 @@ class Game {
   private trailSyncTimer = 0;
 
   private wallScanTimer = 0;
+  /** 画面の右が壁のどちら向きか (+1 / -1)。横向きでばたつかないよう保持する */
+  private tangentSign = 1;
   /** 正面にある岩壁 (ヒント表示と取り付き判定で共用) */
   private nearWall: ClimbWall | null = null;
   private elapsed = 0;
@@ -80,7 +82,7 @@ class Game {
 
     this.wireEvents();
     this.hud.setVisible(false);
-    this.hud.setReticle(this.input.mode === 'pointerlock');
+    this.syncReticle();
     this.onResize();
     window.addEventListener('resize', this.onResize);
     requestAnimationFrame(this.loop);
@@ -141,6 +143,9 @@ class Game {
     this.climb.onNotice = (m) => this.hud.toast(m);
 
     this.climb.onEnter = () => {
+      // 登攀中はレティクルを消す。自分を画面中央に置くので重なるうえ、
+      // 狙う先は方向キーで決めるので使わない
+      this.syncReticle();
       this.hud.toast('岩壁に取り付いた — WASD で方向、Space で登る', true);
     };
     this.climb.onRopeFixed = (wall) => {
@@ -150,6 +155,7 @@ class Game {
     };
     this.climb.onExit = (reason) => {
       this.hud.setClimb(null);
+      this.syncReticle();
       this.stats.climbMoves += this.climb.moveCount;
       if (reason === 'stamina') {
         this.stats.falls += 1;
@@ -168,7 +174,7 @@ class Game {
 
     this.wireNet();
 
-    this.input.onModeChange = (mode) => this.hud.setReticle(mode === 'pointerlock');
+    this.input.onModeChange = () => this.syncReticle();
   }
 
   /** マルチプレイ。静的な山は同期せず、動的な状態だけを同期する */
@@ -408,14 +414,25 @@ class Game {
     return null;
   }
 
-  /** 画面の右が壁のどちら向きか。方向キーを見た目どおりに効かせる */
+  /** レティクルは通常移動のときだけ出す */
+  private syncReticle(): void {
+    this.hud.setReticle(this.input.mode === 'pointerlock' && !this.climb.isClimbing);
+  }
+
+  /**
+   * 画面の右が壁のどちら向きか。方向キーを見た目どおりに効かせる。
+   *
+   * 壁を横から見る向き (内積が 0 付近) では符号が毎フレーム反転しうるので、
+   * はっきり向きを変えたときだけ切り替える。
+   */
   private wallTangentSign(): number {
     const wall = this.climb.wall;
     if (!wall) return 1;
     const rx = Math.cos(this.rig.yaw);
     const rz = -Math.sin(this.rig.yaw);
     const dot = rx * wall.frame.tangent.x + rz * wall.frame.tangent.z;
-    return dot >= 0 ? 1 : -1;
+    if (Math.abs(dot) > 0.35) this.tangentSign = dot >= 0 ? 1 : -1;
+    return this.tangentSign;
   }
 
   private handleActions(dt: number): void {
