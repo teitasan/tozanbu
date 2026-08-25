@@ -44,6 +44,9 @@ export interface WallFrame {
   halfWidth: number;
 }
 
+/** 岩肌メッシュの頂点間隔 (m)。地形の格子より細かくしても意味はない */
+const OVERLAY_STEP = 0.5;
+
 /** 線形 → sRGB のバイト値。テクスチャを焼くたびに pow を呼ばないための表 */
 const SRGB_BYTE = (() => {
   const t = new Uint8Array(1024);
@@ -460,10 +463,12 @@ export class ClimbWall {
    */
   private buildSurfaceOverlay(): void {
     const f = this.frame;
-    // セル1つに頂点1つ。細かい凹凸はノーマルマップが持つので、
-    // メッシュは壁の形に沿うだけでよい
-    const nx = this.cols;
-    const ny = this.rows;
+    // 地形の格子と同じくらい細かく張る。
+    // セル1つに頂点1つだと、頂点の間で弦が岩へ食い込み、
+    // 地形を透かして縞が出る。
+    const sub = Math.max(1, Math.round(this.cellW / OVERLAY_STEP));
+    const nx = this.cols * sub;
+    const ny = this.rows * sub;
     const vertCount = (nx + 1) * (ny + 1);
     const positions = new Float32Array(vertCount * 3);
     const normals = new Float32Array(vertCount * 3);

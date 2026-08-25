@@ -19,7 +19,60 @@ export interface Vec2 {
 }
 
 const WORLD_SIZE = 800;
-const GRID_STEP = 2.0;
+const GRID_STEP = 1.0;
+/**
+ * 緩やかな成分を何セルおきに評価するか。
+ *
+ * 山体・尾根・谷のノイズは波長 8m 以下の成分を持たないので、
+ * 1m ごとに fbm を回しても同じ形を計算し直すだけで無駄。
+ * 粗く取って間を埋め、**段化のリマップだけ 1m で掛ける**。
+ * 崖の立ち上がりの形はそのリマップが決めるので、これで形は細かくなる。
+ */
+const COARSE = 2;
+
+/** 端をはみ出さないように読む */
+function at(a: Float32Array, cn: number, i: number, j: number): number {
+  const ci = i < 0 ? 0 : i > cn - 1 ? cn - 1 : i;
+  const cj = j < 0 ? 0 : j > cn - 1 ? cn - 1 : j;
+  return a[cj * cn + ci];
+}
+
+function sampleLinear(
+  a: Float32Array,
+  cn: number,
+  ci: number,
+  cj: number,
+  tx: number,
+  ty: number,
+): number {
+  const a0 = at(a, cn, ci, cj) * (1 - tx) + at(a, cn, ci + 1, cj) * tx;
+  const a1 = at(a, cn, ci, cj + 1) * (1 - tx) + at(a, cn, ci + 1, cj + 1) * tx;
+  return a0 * (1 - ty) + a1 * ty;
+}
+
+/** Catmull-Rom。節点で折れないので、粗い格子の目が形に残らない */
+function cubic(p0: number, p1: number, p2: number, p3: number, t: number): number {
+  const a = 2 * p1;
+  const b = p2 - p0;
+  const c = 2 * p0 - 5 * p1 + 4 * p2 - p3;
+  const d = -p0 + 3 * p1 - 3 * p2 + p3;
+  return 0.5 * (a + b * t + c * t * t + d * t * t * t);
+}
+
+function sampleCubic(
+  a: Float32Array,
+  cn: number,
+  ci: number,
+  cj: number,
+  tx: number,
+  ty: number,
+): number {
+  const r0 = cubic(at(a, cn, ci - 1, cj - 1), at(a, cn, ci, cj - 1), at(a, cn, ci + 1, cj - 1), at(a, cn, ci + 2, cj - 1), tx);
+  const r1 = cubic(at(a, cn, ci - 1, cj), at(a, cn, ci, cj), at(a, cn, ci + 1, cj), at(a, cn, ci + 2, cj), tx);
+  const r2 = cubic(at(a, cn, ci - 1, cj + 1), at(a, cn, ci, cj + 1), at(a, cn, ci + 1, cj + 1), at(a, cn, ci + 2, cj + 1), tx);
+  const r3 = cubic(at(a, cn, ci - 1, cj + 2), at(a, cn, ci, cj + 2), at(a, cn, ci + 1, cj + 2), at(a, cn, ci + 2, cj + 2), tx);
+  return cubic(r0, r1, r2, r3, ty);
+}
 
 export class Heightfield {
   /** ワールドの一辺 (m)。原点が中心 */
@@ -61,15 +114,52 @@ export class Heightfield {
     const nBand = makeNoise2D(this.seed + 89);
 
     const { n, step, half } = this;
+    const cn = Math.ceil((n - 1) / COARSE) + 3; // 前後1つずつ余分に取る (補間の袖)
+    const cAt = (ci: number) => -half + (ci - 1) * COARSE * step;
+
+    // 1) 緩やかな成分を粗い格子で取る
+    const smoothC = new Float32Array(cn * cn);
+    const fieldC = new Float32Array(cn * cn);
+    const fracC = new Float32Array(cn * cn);
+    const bandC = new Float32Array(cn * cn);
+    const cliffy = p.cliffiness > 0.001;
+    for (let cj = 0; cj < cn; cj++) {
+      const z = cAt(cj);
+      for (let ci = 0; ci < cn; ci++) {
+        const x = cAt(ci);
+        const k = cj * cn + ci;
+        const sm = this.smoothHeight(x, z, p, nRidge, nValley, nWarp, nDetail);
+        smoothC[k] = sm;
+        if (!cliffy) continue;
+        fieldC[k] = clamp01(fbm(nCliff, x * 0.02 + sm * 0.05, z * 0.02 - sm * 0.038, 3) * 0.75 + 0.5);
+        fracC[k] = clamp(p.cliffFracBase + nBand(x * 0.006, z * 0.006) * p.cliffFracVar, 0.05, 0.95);
+        bandC[k] = nBand(x * 0.011 + 31.7, z * 0.011 - 12.4) * 0.5;
+      }
+    }
+
+    // 2) 細かい格子へ広げ、段化だけをここで掛ける
     for (let j = 0; j < n; j++) {
-      const z = -half + j * step;
+      const fy = j / COARSE + 1;
+      const cj = Math.floor(fy);
+      const ty = fy - cj;
       for (let i = 0; i < n; i++) {
-        const x = -half + i * step;
+        const fx = i / COARSE + 1;
+        const ci = Math.floor(fx);
+        const tx = fx - ci;
         const idx = j * n + i;
-        const smooth = this.smoothHeight(x, z, p, nRidge, nValley, nWarp, nDetail);
-        const { h, cliff } = this.applyCliffBands(smooth, x, z, p, nCliff, nBand);
-        this.height[idx] = h;
-        this.cliffMask[idx] = cliff;
+        // 高さは 3次補間。線形だと粗い格子の目に沿って折れ目が出て、
+        // 段化がそれを増幅してしまう
+        const smooth = sampleCubic(smoothC, cn, ci, cj, tx, ty);
+        if (!cliffy) {
+          this.height[idx] = Math.max(0, smooth);
+          continue;
+        }
+        const field = sampleLinear(fieldC, cn, ci, cj, tx, ty);
+        const frac = sampleLinear(fracC, cn, ci, cj, tx, ty);
+        const bandOff = sampleLinear(bandC, cn, ci, cj, tx, ty);
+        const r = this.applyCliffBands(Math.max(0, smooth), p, field, frac, bandOff);
+        this.height[idx] = r.h;
+        this.cliffMask[idx] = r.cliff;
       }
     }
   }
@@ -109,33 +199,29 @@ export class Heightfield {
    * 崖バンド。標高を段状にリマップして、
    * 「垂直に近い壁 + その上のテラス」を作る。
    * frac が小さいほど壁が立つ。frac は場所によって変わるので弱点ができる。
+   *
+   * ここだけは細かい格子ごとに掛ける。壁の立ち上がりの形を決めるのはこの式で、
+   * 粗く取って間を埋めると壁が鈍って階段状の破片になる。
+   *
+   * field は「段化するかどうか」の場。標高でノイズをずらしてあるので、
+   * (x,z) だけで決めた場合のような「山麓から山頂まで一直線の弱点」ができない。
    */
   private applyCliffBands(
     h: number,
-    x: number,
-    z: number,
     p: DifficultyProfile,
-    nCliff: Noise2D,
-    nBand: Noise2D,
+    field: number,
+    frac: number,
+    bandOff: number,
   ): { h: number; cliff: number } {
-    if (p.cliffiness <= 0.001) return { h, cliff: 0 };
-
     // 段化するかどうかを閾値で決める。0/1 に寄せるので
     // 「素の斜面」か「テラス+壁」かのどちらかになり、
     // 中途半端な (歩けないが壁でもない) 斜面ができない。
-    //
-    // ノイズを標高でもずらすのが要点。(x,z) だけで決めると、
-    // 段化しないセクターが山麓から山頂まで一直線のスロープになり、
-    // そこを歩くだけで登れてしまう。標高でずらすと弱点の位置が
-    // バンドごとに変わるので、横に回り込むか登るかの判断が要る。
-    const field = clamp01(fbm(nCliff, x * 0.02 + h * 0.05, z * 0.02 - h * 0.038, 3) * 0.75 + 0.5);
     const alt = clamp01(h / p.peakHeight);
     const threshold = p.cliffiness * (0.72 + alt * 0.42);
     const strength = smoothstep(-0.1, 0.1, threshold - field);
     if (strength <= 0.02) return { h, cliff: 0 };
 
-    const frac = clamp(p.cliffFracBase + nBand(x * 0.006, z * 0.006) * p.cliffFracVar, 0.05, 0.95);
-    const b = h / p.bandHeight + nBand(x * 0.011 + 31.7, z * 0.011 - 12.4) * 0.5;
+    const b = h / p.bandHeight + bandOff;
     const i = Math.floor(b);
     const f = b - i;
     const terraced = (i + smoothstep(0, frac, f)) * p.bandHeight;
