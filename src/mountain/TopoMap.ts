@@ -8,7 +8,7 @@
 
    載せるのは地図の縮尺で判別できるものだけ。
 
-     等高線 / 標高 / 山頂 / 登山開始地点 / 方角 / 縮尺 / 崖
+     等高線 / 標高 / 山頂 / 副峰 / 稜線 / 谷 / 登山開始地点 / 方角 / 縮尺 / 崖
 
    岩肌の難易度・クラック・小さな段差は載せない。
    そこは実際に取り付いてから見て決める。
@@ -116,6 +116,7 @@ export class TopoMap {
     ctx.fillStyle = PAPER;
     ctx.fillRect(0, 0, this.size, this.size);
     this.drawRelief(ctx);
+    this.drawRidgesAndValleys(ctx);
     this.drawCliffs(ctx);
     this.drawContours(ctx);
     this.drawMarkers(ctx);
@@ -180,6 +181,79 @@ export class TopoMap {
     ctx.restore();
     tile.width = 0;
     tile.height = 0;
+  }
+
+  /** 骨格の主稜線・支尾根・谷を淡く載せる (等高線の読み取り補助) */
+  private drawRidgesAndValleys(ctx: CanvasRenderingContext2D): void {
+    const scale = this.size / 1400;
+    const sk = this.field.skeleton;
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    for (const r of sk.ridges) {
+      const a = this.toMap(r.x0, r.z0);
+      const b = this.toMap(r.x1, r.z1);
+      ctx.strokeStyle = r.main ? 'rgba(96,72,48,0.42)' : 'rgba(120,96,72,0.22)';
+      ctx.lineWidth = (r.main ? 3.2 : 2.0) * scale;
+      ctx.setLineDash(r.main ? [] : [6 * scale, 5 * scale]);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+
+    for (const v of sk.valleys) {
+      const a = this.toMap(v.x0, v.z0);
+      const b = this.toMap(v.x1, v.z1);
+      ctx.strokeStyle = 'rgba(72,108,138,0.28)';
+      ctx.lineWidth = 2.2 * scale;
+      ctx.setLineDash([4 * scale, 6 * scale]);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+
+    // 前山の低い支尾根・浅い谷 (外周の等高線読み取り補助)
+    for (const r of sk.foothillRidges) {
+      const a = this.toMap(r.x0, r.z0);
+      const b = this.toMap(r.x1, r.z1);
+      ctx.strokeStyle = 'rgba(108,92,68,0.18)';
+      ctx.lineWidth = 1.6 * scale;
+      ctx.setLineDash([3 * scale, 5 * scale]);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+
+    for (const v of sk.foothillValleys) {
+      const a = this.toMap(v.x0, v.z0);
+      const b = this.toMap(v.x1, v.z1);
+      ctx.strokeStyle = 'rgba(88,118,148,0.16)';
+      ctx.lineWidth = 1.4 * scale;
+      ctx.setLineDash([2 * scale, 5 * scale]);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+
+    // 鞍部は小さな輪で示す。大きな線を増やさず、等高線のくびれと照合できる目印にする。
+    for (const s of sk.saddles) {
+      const m = this.toMap(s.x, s.z);
+      ctx.setLineDash([]);
+      ctx.strokeStyle = 'rgba(120,86,52,0.68)';
+      ctx.lineWidth = Math.max(1.2, 1.8 * scale);
+      ctx.beginPath();
+      ctx.arc(m.x, m.y, 5 * scale, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    ctx.setLineDash([]);
+    ctx.restore();
   }
 
   /**
@@ -411,6 +485,21 @@ export class TopoMap {
     const label = `${Math.round(this.field.summit.y)}m`;
     ctx.strokeText(label, s.x + 22 * scale, s.y);
     ctx.fillText(label, s.x + 22 * scale, s.y);
+
+    for (const p of this.field.secondaryPeaks) {
+      const m = this.toMap(p.x, p.z);
+      ctx.beginPath();
+      ctx.moveTo(m.x, m.y - 11 * scale);
+      ctx.lineTo(m.x + 9 * scale, m.y + 7 * scale);
+      ctx.lineTo(m.x - 9 * scale, m.y + 7 * scale);
+      ctx.closePath();
+      ctx.fillStyle = '#5a4a38';
+      ctx.fill();
+      const sub = `${Math.round(p.y)}m`;
+      ctx.font = `600 ${Math.round(20 * scale)}px system-ui, sans-serif`;
+      ctx.strokeText(sub, m.x + 16 * scale, m.y - 2 * scale);
+      ctx.fillText(sub, m.x + 16 * scale, m.y - 2 * scale);
+    }
 
     // 登山開始地点
     ctx.beginPath();

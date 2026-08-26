@@ -102,6 +102,8 @@ html, body {
 .progress-fill { background: linear-gradient(90deg,#ffd24a,#e0a026); }
 
 .mtn-name { font-size: 15px; font-weight: 700; letter-spacing: 0.03em; }
+
+.goal-row { margin-top: 1px; }
 .party { margin-top: 4px; font-size: 11.5px; color: var(--muted); }
 .party div { display: flex; justify-content: space-between; }
 
@@ -192,8 +194,16 @@ button.primary:hover { background: #3a80e6; }
 .naming { display: grid; gap: 8px; margin-bottom: 12px; }
 .naming label { color: var(--gold); font-size: 12px; }
 .summit-named { color: var(--gold); font-size: 15px; font-weight: 700; margin-bottom: 12px; }
+.summit-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+.summit-actions button {
+  background: rgba(255,255,255,0.08); color: var(--text);
+  border: 1px solid var(--panel-border); border-radius: 6px;
+  padding: 9px 16px; font: inherit; font-size: 13px; cursor: pointer;
+}
+.summit-actions button:hover { background: rgba(255,255,255,0.16); }
+.summit-actions .primary { background: var(--accent); border-color: transparent; color: #fff; }
 
-/* --- ブリーフィング (地形図を読む30秒) ------------------------------- */
+/* --- ブリーフィング (地形図・準備完了) ------------------------------- */
 #briefing { padding: 16px 12px; }
 .brief-box {
   width: min(1080px, 96vw);
@@ -246,6 +256,14 @@ button.primary:hover { background: #3a80e6; }
 .brief-legend li { display: flex; align-items: center; gap: 5px; }
 .brief-legend i { width: 14px; height: 12px; display: inline-block; }
 .lg-contour { border-top: 2px solid #a98a5e; }
+.lg-ridge { border-top: 3px solid rgba(96, 72, 48, 0.75); }
+.lg-valley {
+  border-top: 2px dashed rgba(72, 108, 138, 0.65);
+}
+.lg-saddle {
+  width: 10px !important; height: 10px !important;
+  border: 2px solid rgba(120, 86, 52, 0.68); border-radius: 50%;
+}
 .lg-cliff {
   background: repeating-linear-gradient(-45deg, #8a705a 0 1px, transparent 1px 4px);
 }
@@ -260,6 +278,11 @@ button.primary:hover { background: #3a80e6; }
 }
 .brief-tools { display: flex; align-items: center; gap: 12px; font-size: 12px; }
 .brief-hint { color: var(--muted); }
+.brief-review-hint {
+  color: var(--gold);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
 .brief-party { color: var(--text); }
 #brief-clear {
   background: rgba(255,255,255,0.08); color: var(--text);
@@ -267,3 +290,12 @@ button.primary:hover { background: #3a80e6; }
   padding: 5px 10px; font: inherit; font-size: 12px; cursor: pointer;
 }
 #brief-clear:hover { background: rgba(255,255,255,0.16); }
+.brief-ready-status { color: var(--muted); font-size: 12px; }
+#brief-ready {
+  background: rgba(255,255,255,0.08); color: var(--text);
+  border: 1px solid var(--panel-border); border-radius: 5px;
+  padding: 5px 10px; font: inherit; font-size: 12px; cursor: pointer;
+}
+#brief-ready:not(:disabled):hover { background: rgba(255,255,255,0.16); }
+#brief-ready:disabled { opacity: 0.45; cursor: not-allowed; }
+#brief-ready.ready { border-color: rgba(120,200,120,0.55); color: #b8e0b8; }

@@ -65,13 +65,20 @@ logger.error = (msg, options) => {
 export default defineConfig({
   customLogger: logger,
   plugins: [workerApi()],
+  build: {
+    target: 'es2022',
+    rollupOptions: {
+      input: {
+        main: 'index.html',
+        preview: 'terrain-preview.html',
+      },
+    },
+  },
   server: {
     port: 5173,
     open: false,
     proxy: {
-      // WebSocket だけは Vite のプロキシに任せる (ルーム名を入れたときだけ使う)
       '/ws': { target: 'ws://127.0.0.1:8787', ws: true },
     },
   },
-  build: { target: 'es2022' },
 });

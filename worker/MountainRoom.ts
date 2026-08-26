@@ -53,6 +53,8 @@ export class MountainRoom {
   private mountainId: string | null = null;
   private record: MountainRecord | null = null;
   private nextId = 1;
+  /** ブリーフィングで準備完了を押したプレイヤー */
+  private readonly ready = new Set<string>();
 
   constructor(_ctx: DurableObjectState, _env: Env) {}
 
@@ -108,6 +110,9 @@ export class MountainRoom {
       case 'record':
         this.recordUpdate(ws, msg);
         break;
+      case 'ready':
+        this.readyUpdate(ws);
+        break;
       case 'ping':
         this.send(ws, { t: 'pong' });
         break;
@@ -148,6 +153,7 @@ export class MountainRoom {
       marks: [...this.marks.values()],
       trail: flattenTrail(this.trail),
       record: this.record,
+      ready: [...this.ready],
     });
     this.broadcast({ t: 'joined', p: publicPlayer(player) }, ws);
   }
@@ -213,6 +219,15 @@ export class MountainRoom {
     this.broadcast({ t: 'notice', text: `${p.name} が登頂した` });
   }
 
+  /** ブリーフィングの準備完了。全員が押したら開始 */
+  private readyUpdate(ws: WebSocket): void {
+    const p = this.players.get(ws);
+    if (!p || this.ready.has(p.id)) return;
+    this.ready.add(p.id);
+    this.broadcast({ t: 'ready', id: p.id });
+    if (this.ready.size >= this.players.size) this.broadcast({ t: 'go' });
+  }
+
   /**
    * 地図への書き込み。
    * 名前は詐称できないよう、サーバが持っているものに差し替える。
@@ -256,7 +271,11 @@ export class MountainRoom {
     const p = this.players.get(ws);
     if (!p) return;
     this.players.delete(ws);
+    this.ready.delete(p.id);
     this.broadcast({ t: 'left', id: p.id });
+    if (this.players.size > 0 && this.ready.size >= this.players.size) {
+      this.broadcast({ t: 'go' });
+    }
     if (this.players.size === 0) {
       // 誰もいなくなったら踏み跡とロープは残さない (山そのものは Seed から再生成される)
       this.trail.clear();
@@ -264,6 +283,7 @@ export class MountainRoom {
       this.marks.clear();
       this.record = null;
       this.mountainId = null;
+      this.ready.clear();
     }
   }
 

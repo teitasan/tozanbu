@@ -36,7 +36,7 @@ export class CameraRig {
   private colliders: THREE.Object3D[] = [];
 
   constructor(aspect: number) {
-    this.camera = new THREE.PerspectiveCamera(60, aspect, 0.12, 2200);
+    this.camera = new THREE.PerspectiveCamera(60, aspect, 0.12, 4000);
   }
 
   setColliders(objects: THREE.Object3D[]): void {

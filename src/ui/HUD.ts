@@ -37,6 +37,8 @@ const GRADE_TEXT: Record<string, string> = {
   impossible: '取り付けない',
 };
 
+export type ClimbObjective = 'summit' | 'trailhead';
+
 export interface HudData {
   action: PlayerAction;
   stamina: number;
@@ -51,6 +53,9 @@ export interface HudData {
   mountainId: string;
   difficultyLabel: string;
   summitHeight: number;
+  /** 目標地点までの距離表示 (m) */
+  goalRemain: number;
+  objective: ClimbObjective;
   progress: number;
   rockLabel: string;
   party: PartyMember[];
@@ -76,6 +81,7 @@ export class HUD {
   private readonly mtnName = el('mtn-name');
   private readonly mtnId = el('mtn-id');
   private readonly mtnDiff = el('mtn-diff');
+  private readonly mtnGoalLabel = el('mtn-goal-label');
   private readonly mtnRemain = el('mtn-remain');
   private readonly mtnRock = el('mtn-rock');
   private readonly progressBar = el('progress-bar');
@@ -99,7 +105,12 @@ export class HUD {
   private readonly summitNamed = el('summit-named');
   readonly nameInput = el<HTMLInputElement>('mountain-name');
   readonly nameBtn = el<HTMLButtonElement>('name-btn');
+  readonly continueBtn = el<HTMLButtonElement>('summit-continue');
   readonly backBtn = el<HTMLButtonElement>('back-btn');
+
+  private readonly descent = el('descent');
+  private readonly descentStats = el('descent-stats');
+  readonly descentBackBtn = el<HTMLButtonElement>('descent-back-btn');
 
   private toastTimer = 0;
 
@@ -137,7 +148,8 @@ export class HUD {
     this.mtnName.textContent = d.mountainName;
     this.mtnId.textContent = d.mountainId;
     this.mtnDiff.textContent = d.difficultyLabel;
-    this.mtnRemain.textContent = `${Math.max(0, Math.round(d.summitHeight - d.altitude))}m`;
+    this.mtnGoalLabel.textContent = d.objective === 'trailhead' ? '登山口まで' : '山頂まで';
+    this.mtnRemain.textContent = `${Math.max(0, Math.round(d.goalRemain))}m`;
     this.progressBar.style.width = `${Math.min(1, Math.max(0, d.progress)) * 100}%`;
     this.mtnRock.textContent = d.rockLabel;
 
@@ -255,6 +267,15 @@ export class HUD {
 
   hideSummit(): void {
     this.summit.classList.add('hidden');
+  }
+
+  showDescentComplete(opts: { stats: string }): void {
+    this.descent.classList.remove('hidden');
+    this.descentStats.innerHTML = opts.stats;
+  }
+
+  hideDescentComplete(): void {
+    this.descent.classList.add('hidden');
   }
 }
 

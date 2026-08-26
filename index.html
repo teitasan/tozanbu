@@ -30,7 +30,10 @@
       <section class="panel" id="mountain-panel">
         <div id="mtn-name" class="mtn-name">未踏峰</div>
         <div class="row sub"><span id="mtn-id">-</span><span id="mtn-diff">-</span></div>
-        <div class="row"><span class="label">山頂まで</span><span id="mtn-remain" class="value">-</span></div>
+        <div class="row goal-row">
+          <span class="label" id="mtn-goal-label">山頂まで</span>
+          <span id="mtn-remain" class="value">-</span>
+        </div>
         <div class="bar climbbar"><div id="progress-bar" class="bar-fill progress-fill"></div></div>
         <div id="mtn-rock" class="row sub"></div>
         <div id="party" class="party"></div>
@@ -60,7 +63,7 @@
       <div id="toast" class="toast"></div>
     </div>
 
-    <!-- ブリーフィング (地形図を読む30秒) -->
+    <!-- ブリーフィング (地形図・準備完了) -->
     <div id="briefing" class="overlay hidden">
       <div class="brief-box">
         <header class="brief-head">
@@ -76,13 +79,19 @@
         <footer class="brief-foot">
           <ul class="brief-legend">
             <li><i class="lg-contour"></i>等高線<span id="brief-interval"></span></li>
+            <li><i class="lg-ridge"></i>稜線</li>
+            <li><i class="lg-valley"></i>谷</li>
+            <li><i class="lg-saddle"></i>鞍部</li>
             <li><i class="lg-cliff"></i>崖</li>
             <li><i class="lg-peak"></i>山頂</li>
             <li><i class="lg-start"></i>登山口</li>
           </ul>
           <div class="brief-tools">
+            <span id="brief-review-hint" class="brief-review-hint hidden">Mで閉じる</span>
             <span class="brief-hint">地図をクリックでピン／ドラッグでルート線</span>
             <span id="brief-party" class="brief-party"></span>
+            <span id="brief-ready-status" class="brief-ready-status"></span>
+            <button id="brief-ready" type="button" disabled>準備完了</button>
             <button id="brief-clear" type="button">自分の書き込みを消す</button>
           </div>
         </footer>
@@ -140,7 +149,22 @@
           <button id="name-btn" class="primary" type="button">命名する</button>
         </div>
         <div id="summit-named" class="summit-named hidden"></div>
-        <button id="back-btn" type="button">タイトルへ</button>
+        <div class="summit-actions">
+          <button id="summit-continue" type="button" class="primary">下山して帰還</button>
+          <button id="back-btn" type="button">タイトルへ</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 下山完了 -->
+    <div id="descent" class="overlay hidden">
+      <div class="summit-box">
+        <div class="summit-kicker" id="descent-kicker">DESCENT COMPLETE</div>
+        <h2 id="descent-title">下山完了</h2>
+        <div id="descent-stats" class="summit-stats"></div>
+        <div class="summit-actions">
+          <button id="descent-back-btn" type="button" class="primary">タイトルへ</button>
+        </div>
       </div>
     </div>
 

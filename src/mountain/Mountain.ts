@@ -121,6 +121,18 @@ export class Mountain {
     return Math.hypot(pos.x - s.x, pos.z - s.z) < radius && pos.y > s.y - 4;
   }
 
+  /** 登山口付近に到達したか (下山帰還の判定用) */
+  atTrailhead(pos: THREE.Vector3, radius = 10): boolean {
+    const t = this.field.trailhead;
+    return Math.hypot(pos.x - t.x, pos.z - t.z) < radius && Math.abs(pos.y - t.y) < 8;
+  }
+
+  /** 登山口までの水平距離 (m) */
+  distToTrailhead(pos: THREE.Vector3): number {
+    const t = this.field.trailhead;
+    return Math.hypot(pos.x - t.x, pos.z - t.z);
+  }
+
   update(dt: number): void {
     this.snow.update();
     for (const wall of this.walls.active) wall.update(dt);

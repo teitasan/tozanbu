@@ -23,10 +23,10 @@ import { PlayerController } from './player/PlayerController';
 import { RopeSystem } from './systems/RopeSystem';
 import { StaminaSystem } from './systems/StaminaSystem';
 import { Briefing } from './ui/Briefing';
-import { HUD, type PartyMember } from './ui/HUD';
+import { HUD, type ClimbObjective, type PartyMember } from './ui/HUD';
 import { TitleScreen, type StartConfig } from './ui/TitleScreen';
 
-type GameState = 'title' | 'briefing' | 'playing' | 'summit';
+type GameState = 'title' | 'briefing' | 'playing' | 'summit' | 'descent';
 
 
 class Game {
@@ -64,6 +64,15 @@ class Game {
 
   /** 記録用 */
   private stats = { falls: 0, climbMoves: 0, ropesFixed: 0, maxAltitude: 0 };
+  private summitReached = false;
+  /** 登頂後に下山帰還を選んだか (登山口到達判定の前提) */
+  private descending = false;
+  /** 下山開始時点の登山口までの水平距離 (進捗バー用) */
+  private descentStartDist = 1;
+  /** 登頂から下山開始までの所要時間 (秒) */
+  private ascentElapsed = 0;
+  /** 登山中に M で地形図を開いている */
+  private mapReviewOpen = false;
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
@@ -102,11 +111,11 @@ class Game {
   // --- セットアップ -------------------------------------------------------
 
   private buildEnvironment(): THREE.DirectionalLight {
-    this.scene.fog = new THREE.Fog(0xa8c4dc, 420, 1700);
+    this.scene.fog = new THREE.Fog(0xa8c4dc, 520, 3200);
 
     // 空 (大きな内向き球のグラデーション)
     const sky = new THREE.Mesh(
-      new THREE.SphereGeometry(1600, 24, 16),
+      new THREE.SphereGeometry(2400, 24, 16),
       new THREE.ShaderMaterial({
         side: THREE.BackSide,
         depthWrite: false,
@@ -129,12 +138,12 @@ class Game {
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
     const c = sun.shadow.camera;
-    c.left = -70;
-    c.right = 70;
-    c.top = 70;
-    c.bottom = -70;
+    c.left = -140;
+    c.right = 140;
+    c.top = 140;
+    c.bottom = -140;
     c.near = 1;
-    c.far = 700;
+    c.far = 900;
     sun.shadow.bias = -0.0012;
     this.scene.add(sun);
     this.scene.add(sun.target);
@@ -174,37 +183,53 @@ class Game {
     this.hud.nameInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') void this.submitName();
     });
+    this.hud.continueBtn.addEventListener('click', () => this.beginDescent());
     this.hud.backBtn.addEventListener('click', () => this.returnToTitle());
+    this.hud.descentBackBtn.addEventListener('click', () => this.returnToTitle());
 
-    // ブリーフィングの書き込みはパーティー全員で共有する
+    this.briefing.onReady = () => this.net.sendReady();
     this.briefing.onMark = (mark) => this.net.sendMark(mark);
     this.briefing.onClear = () => this.net.sendUnmark();
 
     this.wireNet();
 
     this.input.onModeChange = () => this.syncReticle();
+    window.addEventListener('keydown', this.onMapKey);
   }
+
+  /** 登山中の M で地形図を開閉 (入力ブロック中も効かせる) */
+  private onMapKey = (e: KeyboardEvent): void => {
+    if (e.code !== 'KeyM' || e.repeat) return;
+    if (this.state !== 'playing') return;
+    e.preventDefault();
+    this.toggleMapReview();
+  };
 
   /** マルチプレイ。静的な山は同期せず、動的な状態だけを同期する */
   private wireNet(): void {
     this.net.onNotice = (text) => this.hud.toast(text, true);
-    this.net.onWelcome = ({ players, ropes, marks, trail, record }) => {
+    this.net.onWelcome = ({ id, players, ropes, marks, trail, record, ready }) => {
       for (const p of players) this.remotes.upsert(p);
       this.mountain?.snow.applyRemote(trail);
-      this.ropes.applyRemote(ropes, (id) => this.mountain?.walls.get(id));
+      this.ropes.applyRemote(ropes, (wid) => this.mountain?.walls.get(wid));
       this.briefing.applyMarks(marks);
+      this.briefing.applyReadyIds(ready);
+      this.briefing.setSelfId(id);
       this.syncParty();
+      this.syncBriefingParty(id);
       if (record && this.mountain) Object.assign(this.mountain.record, record);
       this.hud.toast(`パーティーに参加した (${players.length + 1}人)`, true);
     };
     this.net.onJoin = (p) => {
       this.remotes.upsert(p);
       this.syncParty();
+      this.syncBriefingParty(this.net.selfId);
       this.hud.toast(`${p.name} が合流した`, true);
     };
     this.net.onLeave = (id) => {
       this.remotes.remove(id);
       this.syncParty();
+      this.syncBriefingParty(this.net.selfId);
     };
     this.net.onMark = (mark) => this.briefing.applyMark(mark);
     this.net.onUnmark = (by) => this.briefing.clearBy(by);
@@ -214,7 +239,16 @@ class Game {
     this.net.onRecord = (record) => {
       if (this.mountain) Object.assign(this.mountain.record, record);
     };
+    this.net.onReady = (id) => this.briefing.applyRemoteReady(id);
+    this.net.onGo = () => this.briefing.applyGo();
     this.net.onClose = () => this.remotes.clear();
+  }
+
+  /** ブリーフィング用のパーティー ID を同期する */
+  private syncBriefingParty(selfId: string | null): void {
+    if (!selfId) return;
+    const ids = [selfId, ...this.remotes.roster().map((p) => p.id)];
+    this.briefing.setPartyIds(ids);
   }
 
   /** ブリーフィングに出すパーティーの顔ぶれ */
@@ -239,8 +273,9 @@ class Game {
     this.title.hide();
     this.hud.setVisible(false);
     // ローディング画面の代わりに地形図を出す。
-    // 生成が早く終わってもブリーフィングは 30 秒続く
+    // 生成完了後は準備完了を受け付け、未準備でも 30 秒で自動開始する
     this.briefing.open('山を生成中', cfg.playerName, hashString(cfg.playerName) % 6);
+    this.briefing.setMultiplayer(!!cfg.room);
 
     if (this.mountain) {
       this.scene.remove(this.mountain.group);
@@ -287,6 +322,11 @@ class Game {
     this.stamina.fatigueScale = profile.fatigueScale;
     this.ropes.reset(profile.ropes);
     this.stats = { falls: 0, climbMoves: 0, ropesFixed: 0, maxAltitude: 0 };
+    this.summitReached = false;
+    this.descending = false;
+    this.descentStartDist = 1;
+    this.ascentElapsed = 0;
+    this.mapReviewOpen = false;
     this.elapsed = 0;
 
     // 地形図。3Dの山と同じ Heightfield から等高線を引く
@@ -314,7 +354,7 @@ class Game {
       });
     }
 
-    // ここまでが「ローディング」。残りのブリーフィング時間は地図を読む時間
+    // ここから地図を読み、準備完了を押して登山開始を待つ
     await this.briefing.wait();
     this.briefing.close();
     if (this.state !== 'briefing') return; // 待っている間にタイトルへ戻された
@@ -327,11 +367,26 @@ class Game {
     this.hud.toast(`${mountain.displayName} / 標高 ${Math.round(mountain.summitHeight)}m`, true);
   }
 
+  private beginDescent(): void {
+    const mountain = this.mountain;
+    if (this.state !== 'summit' || !mountain) return;
+    this.ascentElapsed = this.elapsed;
+    this.descending = true;
+    this.descentStartDist = Math.max(1, mountain.distToTrailhead(this.player.position));
+    this.hud.hideSummit();
+    this.state = 'playing';
+    this.syncReticle();
+    this.input.requestLock(true);
+    this.hud.toast('登山口へ向かう — M で地形図を確認できる', true);
+  }
+
   private returnToTitle(): void {
+    if (this.mapReviewOpen) this.closeMapReview();
     this.briefing.close();
     this.net.close();
     this.remotes.clear();
     this.hud.hideSummit();
+    this.hud.hideDescentComplete();
     this.hud.setVisible(false);
     this.input.releaseLock();
     this.state = 'title';
@@ -344,14 +399,43 @@ class Game {
     const dt = Math.min(0.05, Math.max(0, (now - this.prevTime) / 1000));
     this.prevTime = now;
 
-    if (this.state === 'playing') this.step(dt);
-    else if (this.state === 'summit' && this.mountain) this.mountain.update(dt);
+    if (this.state === 'playing' && !this.mapReviewOpen) this.step(dt);
+    else if (this.state === 'summit' && this.mountain) {
+      this.mountain.update(dt);
+      this.remotes.update(dt);
+    } else if (this.state === 'descent' && this.mountain) {
+      this.mountain.update(dt);
+      this.remotes.update(dt);
+    }
 
     this.input.endFrame();
     this.syncSize();
     this.renderer.render(this.scene, this.rig.camera);
     requestAnimationFrame(this.loop);
   };
+
+  private toggleMapReview(): void {
+    if (this.mapReviewOpen) this.closeMapReview();
+    else this.openMapReview();
+  }
+
+  private openMapReview(): void {
+    if (!this.mountain || this.state !== 'playing') return;
+    this.mapReviewOpen = true;
+    this.input.releaseLock();
+    this.input.blocked = true;
+    this.briefing.reopenReview();
+  }
+
+  private closeMapReview(): void {
+    if (!this.mapReviewOpen) return;
+    this.mapReviewOpen = false;
+    this.briefing.closeReview();
+    this.input.blocked = false;
+    this.prevTime = performance.now();
+    this.syncReticle();
+    if (this.state === 'playing') this.input.requestLock(true);
+  }
 
   private step(dt: number): void {
     const mountain = this.mountain;
@@ -382,6 +466,7 @@ class Game {
     this.updateSun();
     this.updateHud();
     this.checkSummit();
+    if (this.descending) this.checkTrailhead();
   }
 
   /** 位置と踏み跡をサーバへ送る */
@@ -501,15 +586,44 @@ class Game {
 
   private checkSummit(): void {
     const mountain = this.mountain;
-    if (!mountain || this.state !== 'playing') return;
+    if (!mountain || this.state !== 'playing' || this.summitReached) return;
     if (!mountain.atSummit(this.player.position)) return;
     void this.finishSummit();
+  }
+
+  private checkTrailhead(): void {
+    const mountain = this.mountain;
+    if (!mountain || this.state !== 'playing' || !this.descending) return;
+    if (!this.player.grounded || this.climb.isClimbing) return;
+    if (!mountain.atTrailhead(this.player.position)) return;
+    this.finishDescent();
+  }
+
+  private finishDescent(): void {
+    const mountain = this.mountain;
+    const cfg = this.config;
+    if (!mountain || !cfg || this.state !== 'playing') return;
+    if (this.mapReviewOpen) this.closeMapReview();
+    this.descending = false;
+    this.state = 'descent';
+    this.input.releaseLock();
+
+    const descentSec = Math.max(0, this.elapsed - this.ascentElapsed);
+    const stats =
+      `登頂 <b>${formatTime(this.ascentElapsed)}</b> ／ 下山 <b>${formatTime(descentSec)}</b><br>` +
+      `合計 <b>${formatTime(this.elapsed)}</b> ／ 標高 <b>${Math.round(mountain.summitHeight)}m</b><br>` +
+      `落下 ${this.stats.falls} 回 ／ 登攀 ${this.stats.climbMoves} 手 ／ ロープ ${this.stats.ropesFixed} 本`;
+
+    this.hud.showDescentComplete({ stats });
+    this.hud.toast('下山完了 — タイトルへ戻れます', true);
   }
 
   private async finishSummit(): Promise<void> {
     const mountain = this.mountain;
     const cfg = this.config;
-    if (!mountain || !cfg) return;
+    if (!mountain || !cfg || this.summitReached) return;
+    if (this.mapReviewOpen) this.closeMapReview();
+    this.summitReached = true;
     this.state = 'summit';
     this.input.releaseLock();
 
@@ -536,6 +650,7 @@ class Game {
         namedText: `初登頂 ${updated.firstAscentBy ?? '-'} ／ 登頂者 ${updated.ascents} 人目`,
       });
     }
+    this.hud.toast('登頂 — 下山して帰還するか、タイトルへ戻れます', true);
   }
 
   private async submitName(): Promise<void> {
@@ -574,13 +689,24 @@ class Game {
       ...this.remotes.roster(),
     ];
 
+    const pos = this.player.position;
+    const objective: ClimbObjective = this.descending ? 'trailhead' : 'summit';
+    const goalRemain =
+      objective === 'trailhead'
+        ? mountain.distToTrailhead(pos)
+        : Math.max(0, mountain.summitHeight - pos.y);
+    const progress =
+      objective === 'trailhead'
+        ? clamp01(1 - goalRemain / this.descentStartDist)
+        : clamp01(pos.y / Math.max(1, mountain.summitHeight));
+
     this.hud.update({
       action,
       stamina: this.stamina.stamina,
       maxStamina: this.stamina.maxStamina,
       initialMax: this.stamina.initialMax,
       recovering: action === 'REST',
-      altitude: this.player.position.y,
+      altitude: pos.y,
       temperature: this.stamina.env.temperature,
       ropes: this.ropes.carried,
       snowLabel: snow.depth > 0.05 ? `積雪 ${(snow.depth * 100).toFixed(0)}cm` : '',
@@ -588,7 +714,9 @@ class Game {
       mountainId: mountain.record.id,
       difficultyLabel: `${mountain.profile.level}級 ${mountain.profile.label}`,
       summitHeight: mountain.summitHeight,
-      progress: clamp01(this.player.position.y / Math.max(1, mountain.summitHeight)),
+      goalRemain,
+      objective,
+      progress,
       rockLabel: mountain.surface.describe(),
       party,
     });
@@ -618,7 +746,9 @@ class Game {
   }
 
   private currentHint(russelling: boolean): string | null {
+    if (this.mapReviewOpen) return null;
     if (this.input.needsClickToLock) return 'クリックで視点を操作する';
+    if (this.descending) return '登山口へ向かう — <kbd>M</kbd> で地形図';
     if (this.climb.isClimbing) return null; // 操作は登攀パネルに出している
     if (this.player.isMantling) return null;
     if (this.mountain && this.player.grounded) {

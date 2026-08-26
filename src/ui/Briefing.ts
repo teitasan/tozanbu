@@ -8,7 +8,8 @@
      急斜面を避けるか直登するか / どこを中間目標にするか
 
    地図にはピンとルート線を描ける。マルチプレイでは全員に共有される。
-   生成が 30 秒より早く終わってもブリーフィングは 30 秒続く。
+   生成が完了したら「準備完了」で早期開始できる (マルチは全員が準備完了)。
+   30 秒経過しても未準備なら自動で開始する。
    =========================================================== */
 
 import type { TopoMap } from '../mountain/TopoMap';
@@ -44,9 +45,15 @@ export class Briefing {
   private readonly stage = el('brief-map');
   private readonly partyEl = el('brief-party');
   private readonly clearBtn = el<HTMLButtonElement>('brief-clear');
+  readonly readyBtn = el<HTMLButtonElement>('brief-ready');
+  private readonly readyStatusEl = el('brief-ready-status');
   private readonly intervalEl = el('brief-interval');
+  private readonly reviewHintEl = el('brief-review-hint');
   /** 書き込み用。地形図の上に重ねる */
   private readonly ink = document.createElement('canvas');
+
+  /** 登山中に M で開いた閲覧モード (タイマー・準備完了 UI は出さない) */
+  private reviewMode = false;
 
   private map: TopoMap | null = null;
   private mapCanvas: HTMLCanvasElement | null = null;
@@ -59,6 +66,17 @@ export class Briefing {
   private seq = 0;
   private resolveDone: (() => void) | null = null;
 
+  private genComplete = false;
+  private selfReady = false;
+  private multiplayer = false;
+  private selfId: string | null = null;
+  /** 部屋にいるプレイヤー ID (自分を含む) */
+  private partyIds: string[] = [];
+  /** 準備完了を押したプレイヤー ID */
+  private readyIds = new Set<string>();
+
+  /** 自分が準備完了を押した */
+  onReady: (() => void) | null = null;
   /** 自分が描いた書き込み (共有する) */
   onMark: ((mark: MapMark) => void) | null = null;
   /** 自分の書き込みを全部消した */
@@ -74,6 +92,7 @@ export class Briefing {
       this.redraw();
       this.onClear?.();
     });
+    this.readyBtn.addEventListener('click', () => this.markSelfReady());
   }
 
   get visible(): boolean {
@@ -105,16 +124,37 @@ export class Briefing {
     this.mtnEl.textContent = text;
   }
 
+  setMultiplayer(v: boolean): void {
+    this.multiplayer = v;
+    this.updateReadyUI();
+  }
+
+  setSelfId(id: string): void {
+    this.selfId = id;
+    if (this.selfReady) this.readyIds.add(id);
+    this.updateReadyUI();
+  }
+
   /** 山の生成を待たずに開く。地図は用意でき次第はめ込む */
   open(title: string, selfName: string, hue: number): void {
     this.selfName = selfName;
     this.selfHue = hue;
     this.marks = [];
     this.drawing = null;
+    this.genComplete = false;
+    this.selfReady = false;
+    this.multiplayer = false;
+    this.selfId = null;
+    this.partyIds = [];
+    this.readyIds.clear();
     this.mtnEl.textContent = title;
     this.statusEl.textContent = '地形図を作成中';
     this.statusEl.classList.remove('hidden');
     this.intervalEl.textContent = '';
+    this.readyBtn.disabled = true;
+    this.readyBtn.textContent = '準備完了';
+    this.readyBtn.classList.remove('ready');
+    this.readyStatusEl.textContent = '';
     this.root.classList.remove('hidden');
     this.endsAt = performance.now() + BRIEFING_SEC * 1000;
     this.tick();
@@ -133,11 +173,41 @@ export class Briefing {
     this.ink.height = map.size;
     this.statusEl.classList.add('hidden');
     this.intervalEl.textContent = `等高線 ${map.minor}m ごと（太線 ${map.index}m）`;
+    this.genComplete = true;
     this.redraw();
+    this.updateReadyUI();
   }
 
   setParty(names: string[]): void {
     this.partyEl.textContent = names.length > 1 ? `${names.length}人で登る: ${names.join(' / ')}` : 'ソロ';
+  }
+
+  /** マルチプレイのパーティー ID (自分を含む) */
+  setPartyIds(ids: string[]): void {
+    this.partyIds = ids;
+    this.updateReadyUI();
+    this.tryResolve();
+  }
+
+  /** welcome などで受け取った準備完了一覧 */
+  applyReadyIds(ids: string[]): void {
+    this.readyIds = new Set(ids);
+    this.updateReadyUI();
+    this.tryResolve();
+  }
+
+  /** 他プレイヤーが準備完了 */
+  applyRemoteReady(id: string): void {
+    this.readyIds.add(id);
+    this.updateReadyUI();
+    this.tryResolve();
+  }
+
+  /** 全員準備完了 — サーバからの go */
+  applyGo(): void {
+    // ready 通知と同じ接続上で順番に届くため、ローカルにも全員分の
+    // 状態が反映されていることを確認してから開始する。
+    this.tryResolve();
   }
 
   /** 他のプレイヤーの書き込み */
@@ -161,6 +231,10 @@ export class Briefing {
   }
 
   close(): void {
+    if (this.reviewMode) {
+      this.closeReview();
+      return;
+    }
     this.root.classList.add('hidden');
     if (this.timer !== null) {
       clearInterval(this.timer);
@@ -170,10 +244,82 @@ export class Briefing {
     this.resolveDone = null;
   }
 
+  /** 登山中に地形図を再表示する (既存の地図・マークをそのまま使う) */
+  reopenReview(): void {
+    if (!this.map) return;
+    this.reviewMode = true;
+    this.root.classList.remove('hidden');
+    this.timerEl.classList.add('hidden');
+    this.readyBtn.classList.add('hidden');
+    this.readyStatusEl.classList.add('hidden');
+    this.reviewHintEl.classList.remove('hidden');
+  }
+
+  /** 登山中の地形図閲覧を閉じる */
+  closeReview(): void {
+    if (!this.reviewMode) return;
+    this.reviewMode = false;
+    this.root.classList.add('hidden');
+    this.reviewHintEl.classList.add('hidden');
+    this.timerEl.classList.remove('hidden');
+    this.readyBtn.classList.remove('hidden');
+    this.readyStatusEl.classList.remove('hidden');
+  }
+
+  get inReview(): boolean {
+    return this.reviewMode;
+  }
+
   /** デバッグ用。カウントダウンを飛ばす */
   skip(): void {
     this.endsAt = performance.now();
     this.tick();
+  }
+
+  private markSelfReady(): void {
+    if (!this.genComplete || this.selfReady) return;
+    this.selfReady = true;
+    if (this.selfId) this.readyIds.add(this.selfId);
+    this.readyBtn.disabled = true;
+    this.readyBtn.textContent = '準備完了 ✓';
+    this.readyBtn.classList.add('ready');
+    this.onReady?.();
+    if (!this.multiplayer) this.tryResolve(true);
+    else this.updateReadyUI();
+  }
+
+  private updateReadyUI(): void {
+    if (!this.genComplete) {
+      this.readyBtn.disabled = true;
+      this.readyStatusEl.textContent = '';
+      return;
+    }
+    this.readyBtn.disabled = this.selfReady;
+    if (!this.multiplayer) {
+      this.readyStatusEl.textContent = this.selfReady ? 'いつでも開始できます' : '地図を確認して準備完了を押す';
+      return;
+    }
+    const total = Math.max(1, this.partyIds.length);
+    const readyCount = this.partyIds.filter((id) => this.readyIds.has(id)).length;
+    this.readyStatusEl.textContent = `準備 ${readyCount}/${total}`;
+  }
+
+  private allReady(): boolean {
+    if (!this.genComplete || !this.selfReady) return false;
+    if (!this.multiplayer) return true;
+    if (this.partyIds.length === 0) return false;
+    return this.partyIds.every((id) => this.readyIds.has(id));
+  }
+
+  private tryResolve(force = false): void {
+    if (!this.resolveDone) return;
+    if (!force && !this.allReady()) return;
+    if (this.timer !== null) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    this.resolveDone();
+    this.resolveDone = null;
   }
 
   // --- 書き込み -----------------------------------------------------------

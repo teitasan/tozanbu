@@ -32,16 +32,19 @@ export interface JoinOptions {
 export class NetClient {
   private ws: WebSocket | null = null;
   private lastStateAt = 0;
+  private readyPending = false;
 
   connected = false;
   selfId: string | null = null;
 
   onWelcome: ((data: {
+    id: string;
     players: RemoteSnapshot[];
     ropes: FixedRope[];
     marks: MapMark[];
     trail: number[];
     record: MountainRecord | null;
+    ready: string[];
   }) => void) | null = null;
   onJoin: ((p: RemoteSnapshot) => void) | null = null;
   onLeave: ((id: string) => void) | null = null;
@@ -52,6 +55,8 @@ export class NetClient {
   onRope: ((rope: FixedRope) => void) | null = null;
   onRecord: ((record: MountainRecord) => void) | null = null;
   onNotice: ((text: string) => void) | null = null;
+  onReady: ((id: string) => void) | null = null;
+  onGo: (() => void) | null = null;
   onClose: (() => void) | null = null;
 
   connect(opts: JoinOptions): void {
@@ -72,6 +77,10 @@ export class NetClient {
     ws.addEventListener('open', () => {
       this.connected = true;
       this.send({ t: 'join', mountain: opts.mountainId, name: opts.name, x: opts.x, y: opts.y, z: opts.z });
+      if (this.readyPending) {
+        this.readyPending = false;
+        this.send({ t: 'ready' });
+      }
     });
     ws.addEventListener('message', (e) => this.receive(String(e.data)));
     ws.addEventListener('close', () => {
@@ -95,11 +104,13 @@ export class NetClient {
       case 'welcome':
         this.selfId = String(msg.id);
         this.onWelcome?.({
+          id: this.selfId,
           players: (msg.players as RemoteSnapshot[]) ?? [],
           ropes: (msg.ropes as FixedRope[]) ?? [],
           marks: (msg.marks as MapMark[]) ?? [],
           trail: (msg.trail as number[]) ?? [],
           record: (msg.record as MountainRecord | null) ?? null,
+          ready: (msg.ready as string[]) ?? [],
         });
         break;
       case 'joined':
@@ -128,6 +139,12 @@ export class NetClient {
         break;
       case 'notice':
         this.onNotice?.(String(msg.text));
+        break;
+      case 'ready':
+        this.onReady?.(String(msg.id));
+        break;
+      case 'go':
+        this.onGo?.();
         break;
     }
   }
@@ -167,6 +184,17 @@ export class NetClient {
     if (this.connected) this.send({ t: 'record', record });
   }
 
+  /** ブリーフィングで準備完了 */
+  sendReady(): void {
+    if (this.connected) {
+      this.send({ t: 'ready' });
+      return;
+    }
+    // 地形生成完了直後は WebSocket の open より先に押されることがある。
+    // 接続後、join の直後に一度だけ送る。
+    this.readyPending = true;
+  }
+
   close(): void {
     if (this.ws) {
       this.ws.onclose = null;
@@ -179,5 +207,6 @@ export class NetClient {
     this.ws = null;
     this.connected = false;
     this.selfId = null;
+    this.readyPending = false;
   }
 }

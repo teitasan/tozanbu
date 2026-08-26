@@ -115,8 +115,9 @@ export class RemotePlayers {
   }
 
   /** HUD のパーティー表示用 */
-  roster(): { name: string; altitude: number; stamina: number; maxStamina: number; action: string }[] {
+  roster(): { id: string; name: string; altitude: number; stamina: number; maxStamina: number; action: string }[] {
     return [...this.players.values()].map((r) => ({
+      id: r.id,
       name: r.name,
       altitude: r.target.y,
       stamina: r.cur,

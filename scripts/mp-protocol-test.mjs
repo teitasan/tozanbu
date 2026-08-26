@@ -174,6 +174,27 @@ async function main() {
   const rope = await b.wait((m) => m.t === 'rope');
   check('ロープが共有される', rope.r.wallId === 'w1_2' && rope.r.by === 'あさひ');
 
+  // ブリーフィングの準備完了
+  a.send({ t: 'ready' });
+  const readyA = await a.wait((m) => m.t === 'ready');
+  check('準備完了が中継される', readyA.id === welcomeA.id);
+  check('1人だけでは go が来ない', !a.inbox.some((m) => m.t === 'go'));
+
+  b.send({ t: 'ready' });
+  const readyB = await b.wait((m) => m.t === 'ready' && m.id === welcomeB.id);
+  check('2人目の準備完了', readyB.id === welcomeB.id);
+  const goA = await a.wait((m) => m.t === 'go');
+  const goB = await b.wait((m) => m.t === 'go');
+  check('全員準備完了で go', goA.t === 'go' && goB.t === 'go');
+
+  // 後から入った人が準備状態を受け取れるか
+  const c2 = client(url);
+  await c2.open();
+  c2.send({ t: 'join', mountain: id, name: 'あとから2', x: 0, y: 0, z: 0 });
+  const welcomeC2 = await c2.wait((m) => m.t === 'welcome');
+  check('後続が ready 一覧を受け取る', welcomeC2.ready?.length === 2, `ready=${welcomeC2.ready?.length}`);
+  c2.close();
+
   // ブリーフィングの書き込み
   a.send({ t: 'mark', m: { id: '7', hue: 2, by: 'なりすまし', pts: [0.5, 0.4, 0.6, 0.45] } });
   const mark = await b.wait((m) => m.t === 'mark');

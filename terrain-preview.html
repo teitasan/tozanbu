@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>地形プレビュー — 登攀</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: system-ui, sans-serif;
+        background: #e8e2d6;
+        color: #2a2218;
+      }
+      body { margin: 0; padding: 16px; }
+      h1 { font-size: 1.1rem; margin: 0 0 12px; }
+      .toolbar {
+        display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: end;
+        margin-bottom: 12px; font-size: 14px;
+      }
+      label { display: flex; flex-direction: column; gap: 4px; }
+      input, select, button {
+        font: inherit; padding: 6px 10px; border-radius: 6px;
+        border: 1px solid #b8aa96; background: #faf6ef;
+      }
+      button { cursor: pointer; background: #3b2f22; color: #faf6ef; border: none; }
+      button:hover { background: #524032; }
+      .stats { font-size: 13px; color: #5a4a38; margin-bottom: 8px; min-height: 1.2em; }
+      .stage {
+        display: inline-block; background: #d8cfc0; padding: 8px;
+        border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+      }
+      canvas { display: block; max-width: min(92vw, 900px); height: auto; }
+      .hint { margin-top: 10px; font-size: 12px; color: #6a5a48; max-width: 720px; }
+      a { color: #1f6fb2; }
+    </style>
+  </head>
+  <body>
+    <h1>地形プレビュー (開発用)</h1>
+    <div class="toolbar">
+      <label>Seed <input id="seed" type="number" value="12345" /></label>
+      <label>難易度
+        <select id="diff">
+          <option value="1">1 ハイキング</option>
+          <option value="2">2 一般登山</option>
+          <option value="3" selected>3 岩稜</option>
+          <option value="4">4 高難度</option>
+          <option value="5">5 最高難度</option>
+        </select>
+      </label>
+      <button id="gen" type="button">再生成</button>
+      <a href="/">← ゲームへ</a>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="stage" id="stage"></div>
+    <p class="hint">
+      本番のブリーフィングと同じ TopoMap を表示します。稜線 (茶)・谷 (青破線)・副峰を確認できます。
+      URL: <code>/terrain-preview.html</code>
+    </p>
+    <script type="module" src="/src/terrain-preview.ts"></script>
+  </body>
+</html>

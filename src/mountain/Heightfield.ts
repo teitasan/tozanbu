@@ -1,36 +1,58 @@
 /* ===========================================================
    Seed から決定論的に生成される山のハイトフィールド。
 
-   基本形状:
-     山体 (円錐) + 尾根 (リッジノイズ) - 谷 (fBm) + 麓の起伏
-   そのあとに「崖バンド」を適用して、
-   標高帯ごとに垂直に近い岩壁とその上のテラスを作る。
-   崖バンドの強さは場所によって変わるので、
-   同じバンドでも「歩いて抜けられる弱点」と「登るしかない壁」ができる。
+   1) MountainSkeleton で主峰・副峰・稜線・谷の骨格を作る
+   2) 肉付け (fBm)・侵食・局所崖・表面ノイズを載せる
+   3) 必要なら崖バンドで垂直に近い壁とテラスを作る
+
+   水平スケール:
+     WORLD_SIZE = 2000m (従来 800m)
+     GRID_STEP  = 2m    (従来 1m。セル数は 1001² ≒ 旧 801² と同程度)
+     COARSE     = 4     (骨格・緩成分は 8m 刻みで評価し 3次補間)
    =========================================================== */
 
 import { clamp, clamp01, lerp, smoothstep } from '../core/math';
 import { fbm, makeNoise2D, ridgedFbm, type Noise2D } from '../core/rng';
 import type { DifficultyProfile } from './difficulty';
+import {
+  approximateTrailhead,
+  buildMountainSkeleton,
+  forelandContinuousAt,
+  forelandSkeletonAt,
+  skeletonHeightAt,
+  type MountainSkeleton,
+} from './MountainSkeleton';
 
 export interface Vec2 {
   x: number;
   z: number;
 }
 
-const WORLD_SIZE = 800;
-const GRID_STEP = 1.0;
 /**
- * 緩やかな成分を何セルおきに評価するか。
- *
- * 山体・尾根・谷のノイズは波長 8m 以下の成分を持たないので、
- * 1m ごとに fbm を回しても同じ形を計算し直すだけで無駄。
- * 粗く取って間を埋め、**段化のリマップだけ 1m で掛ける**。
- * 崖の立ち上がりの形はそのリマップが決めるので、これで形は細かくなる。
+ * ワールド一辺 (m)。800m 級より広く、尾根・谷・副峰を読めるスケール。
+ * 1m グリッドのまま 4 倍にすると 1600 万セルになり重いので 2m 刻みにしている。
  */
-const COARSE = 2;
+const WORLD_SIZE = 2000;
+/** 標高・当たり判定の格子間隔 (m) */
+const GRID_STEP = 2.0;
+/** 骨格・緩成分の粗い評価間隔 (格子数)。実距離 = COARSE × GRID_STEP = 8m */
+const COARSE = 4;
 
-/** 端をはみ出さないように読む */
+/**
+ * 前山・外周帯が本体山体から切り替わる内側半径 (山体 radius に対する比率)。
+ * 主峰付近の岩壁・稜線難易度を薄めないため、内側では foreland を載せない。
+ */
+const FORELAND_INNER = 0.48;
+/** 前山がフルに効くまでの外側半径 (比率) */
+const FORELAND_OUTER = 0.66;
+/** ワールド端で標高を落とすフェード幅 (m) */
+const FORELAND_EDGE_FADE = 130;
+/** 線状骨格の最大標高 (peakHeight に対する比率) */
+const FORELAND_PEAK_REL = 0.18;
+/** 登山口周辺の安全低地半径 (m) */
+const TRAILHEAD_SAFE_INNER = 30;
+const TRAILHEAD_SAFE_OUTER = 62;
+
 function at(a: Float32Array, cn: number, i: number, j: number): number {
   const ci = i < 0 ? 0 : i > cn - 1 ? cn - 1 : i;
   const cj = j < 0 ? 0 : j > cn - 1 ? cn - 1 : j;
@@ -50,7 +72,6 @@ function sampleLinear(
   return a0 * (1 - ty) + a1 * ty;
 }
 
-/** Catmull-Rom。節点で折れないので、粗い格子の目が形に残らない */
 function cubic(p0: number, p1: number, p2: number, p3: number, t: number): number {
   const a = 2 * p1;
   const b = p2 - p0;
@@ -75,20 +96,19 @@ function sampleCubic(
 }
 
 export class Heightfield {
-  /** ワールドの一辺 (m)。原点が中心 */
   readonly size = WORLD_SIZE;
   readonly half = WORLD_SIZE / 2;
   readonly step = GRID_STEP;
-  /** 1辺のサンプル数 */
   readonly n: number;
+  readonly skeleton: MountainSkeleton;
 
-  /** 標高 (m) */
   readonly height: Float32Array;
-  /** 崖バンドの適用強度 0..1 (地表分類と岩壁探索に使う) */
   readonly cliffMask: Float32Array;
 
   readonly summit = { x: 0, y: 0, z: 0 };
   readonly trailhead = { x: 0, y: 0, z: 0 };
+  /** 主峰以外の顕著な峰 (地図表示用) */
+  readonly secondaryPeaks: { x: number; y: number; z: number }[] = [];
 
   constructor(
     readonly seed: number,
@@ -97,47 +117,49 @@ export class Heightfield {
     this.n = Math.round(WORLD_SIZE / GRID_STEP) + 1;
     this.height = new Float32Array(this.n * this.n);
     this.cliffMask = new Float32Array(this.n * this.n);
+    this.skeleton = buildMountainSkeleton(seed, profile.radius);
     this.generate();
     this.findSummit();
+    this.findSecondaryPeaks();
     this.findTrailhead();
   }
 
-  // --- 生成 ---------------------------------------------------------------
-
   private generate(): void {
     const p = this.profile;
+    const sk = this.skeleton;
     const nRidge = makeNoise2D(this.seed + 11);
     const nValley = makeNoise2D(this.seed + 23);
     const nWarp = makeNoise2D(this.seed + 37);
     const nDetail = makeNoise2D(this.seed + 53);
     const nCliff = makeNoise2D(this.seed + 71);
     const nBand = makeNoise2D(this.seed + 89);
+    const nErode = makeNoise2D(this.seed + 103);
+    const nFore = makeNoise2D(this.seed + 127);
 
     const { n, step, half } = this;
-    const cn = Math.ceil((n - 1) / COARSE) + 3; // 前後1つずつ余分に取る (補間の袖)
+    const cn = Math.ceil((n - 1) / COARSE) + 3;
     const cAt = (ci: number) => -half + (ci - 1) * COARSE * step;
 
-    // 1) 緩やかな成分を粗い格子で取る
     const smoothC = new Float32Array(cn * cn);
     const fieldC = new Float32Array(cn * cn);
     const fracC = new Float32Array(cn * cn);
     const bandC = new Float32Array(cn * cn);
     const cliffy = p.cliffiness > 0.001;
+
     for (let cj = 0; cj < cn; cj++) {
       const z = cAt(cj);
       for (let ci = 0; ci < cn; ci++) {
         const x = cAt(ci);
         const k = cj * cn + ci;
-        const sm = this.smoothHeight(x, z, p, nRidge, nValley, nWarp, nDetail);
+        const sm = this.smoothHeight(x, z, p, sk, nRidge, nValley, nWarp, nDetail, nErode, nFore);
         smoothC[k] = sm;
         if (!cliffy) continue;
-        fieldC[k] = clamp01(fbm(nCliff, x * 0.02 + sm * 0.05, z * 0.02 - sm * 0.038, 3) * 0.75 + 0.5);
-        fracC[k] = clamp(p.cliffFracBase + nBand(x * 0.006, z * 0.006) * p.cliffFracVar, 0.05, 0.95);
-        bandC[k] = nBand(x * 0.011 + 31.7, z * 0.011 - 12.4) * 0.5;
+        fieldC[k] = clamp01(fbm(nCliff, x * 0.012 + sm * 0.04, z * 0.012 - sm * 0.032, 3) * 0.75 + 0.5);
+        fracC[k] = clamp(p.cliffFracBase + nBand(x * 0.004, z * 0.004) * p.cliffFracVar, 0.05, 0.95);
+        bandC[k] = nBand(x * 0.007 + 31.7, z * 0.007 - 12.4) * 0.5;
       }
     }
 
-    // 2) 細かい格子へ広げ、段化だけをここで掛ける
     for (let j = 0; j < n; j++) {
       const fy = j / COARSE + 1;
       const cj = Math.floor(fy);
@@ -147,8 +169,6 @@ export class Heightfield {
         const ci = Math.floor(fx);
         const tx = fx - ci;
         const idx = j * n + i;
-        // 高さは 3次補間。線形だと粗い格子の目に沿って折れ目が出て、
-        // 段化がそれを増幅してしまう
         const smooth = sampleCubic(smoothC, cn, ci, cj, tx, ty);
         if (!cliffy) {
           this.height[idx] = Math.max(0, smooth);
@@ -168,44 +188,63 @@ export class Heightfield {
     x: number,
     z: number,
     p: DifficultyProfile,
+    sk: MountainSkeleton,
     nRidge: Noise2D,
     nValley: Noise2D,
     nWarp: Noise2D,
     nDetail: Noise2D,
+    nErode: Noise2D,
+    nFore: Noise2D,
   ): number {
-    const dist = Math.hypot(x, z);
-    const r = dist / p.radius;
+    const wx = x + nWarp(x * 0.0022, z * 0.0022) * 85;
+    const wz = z + nWarp(x * 0.0022 + 11.3, z * 0.0022 - 7.1) * 85;
 
-    // ドメインワープで円錐っぽさを崩す
-    const wx = x + nWarp(x * 0.0035, z * 0.0035) * 55;
-    const wz = z + nWarp(x * 0.0035 + 11.3, z * 0.0035 - 7.1) * 55;
+    const rawSk = skeletonHeightAt(wx, wz, sk, p.radius);
+    let h = rawSk * p.peakHeight;
 
-    // 山体。歩ける斜度に収まるよう、ほぼ直線的な円錐にする
-    let h = p.peakHeight * Math.pow(clamp01(1 - r), 1.12);
+    const distMain = Math.hypot(x - sk.peaks[0].x, z - sk.peaks[0].z);
+    const flank = smoothstep(p.radius * 0.08, p.radius * 0.35, distMain) *
+      smoothstep(p.radius * 1.15, p.radius * 0.55, distMain);
 
-    // 尾根と谷は中腹で最も強く、山頂と山麓では弱める
-    const flank = smoothstep(0.03, 0.28, r) * smoothstep(1.15, 0.5, r);
-    h += (ridgedFbm(nRidge, wx * 0.0075, wz * 0.0075, 5) - 0.42) * p.ridgeAmp * flank * 2;
-    h -= Math.max(0, fbm(nValley, wx * 0.0052, wz * 0.0052, 4)) * p.valleyAmp * flank * 1.6;
+    h += (ridgedFbm(nRidge, wx * 0.0048, wz * 0.0048, 4) - 0.42) * p.ridgeAmp * flank * 1.8;
+    h -= Math.max(0, fbm(nValley, wx * 0.0035, wz * 0.0035, 4)) * p.valleyAmp * flank * 1.4;
 
-    // 麓の起伏と細かいディテール
-    h += fbm(nDetail, x * 0.0042, z * 0.0042, 4) * 13 * smoothstep(0.25, 1.0, r);
-    h += fbm(nDetail, x * 0.031, z * 0.031, 3) * 1.5;
+    const erode = fbm(nErode, x * 0.003, z * 0.003, 3);
+    h -= Math.max(0, erode) * 6 * smoothstep(0.15, 0.85, rawSk);
+
+    // --- 前山・外周帯 (foothill / foreland) ---
+    // 線状骨格だけでは広い平地に見えるため、低周波の連続起伏面を主体にする。
+    const distCenter = Math.hypot(x, z);
+    const worldEdge = this.half - 22;
+    let foreW =
+      smoothstep(p.radius * FORELAND_INNER, p.radius * FORELAND_OUTER, distCenter) *
+      (1 - smoothstep(worldEdge - FORELAND_EDGE_FADE, worldEdge - 6, distCenter));
+    foreW *= 1 - smoothstep(0.1, 0.34, rawSk);
+
+    if (foreW > 0.001) {
+      const rawSkelFore = forelandSkeletonAt(wx, wz, sk, p.radius);
+      let foreH = rawSkelFore * p.peakHeight * FORELAND_PEAK_REL;
+      foreH += forelandContinuousAt(x, z, sk, p.radius, nFore, nRidge, nValley, nWarp);
+
+      const trail = approximateTrailhead(sk, p.radius);
+      const distFromTrail = Math.hypot(x - trail.x, z - trail.z);
+      const trailSafe = 1 - smoothstep(TRAILHEAD_SAFE_INNER, TRAILHEAD_SAFE_OUTER, distFromTrail);
+      foreH *= 1 - trailSafe * 0.82;
+
+      const edgeDrop = smoothstep(worldEdge - 190, worldEdge - 10, distCenter);
+      foreH *= 1 - edgeDrop * 0.48;
+      foreH -= edgeDrop * 4.2;
+
+      h += foreH * foreW;
+    }
+
+    const edge = Math.hypot(x, z) / p.radius;
+    h += fbm(nDetail, x * 0.0028, z * 0.0028, 4) * 5 * smoothstep(0.55, 1.08, edge);
+    h += fbm(nDetail, x * 0.022, z * 0.022, 3) * 1.8;
 
     return Math.max(0, h);
   }
 
-  /**
-   * 崖バンド。標高を段状にリマップして、
-   * 「垂直に近い壁 + その上のテラス」を作る。
-   * frac が小さいほど壁が立つ。frac は場所によって変わるので弱点ができる。
-   *
-   * ここだけは細かい格子ごとに掛ける。壁の立ち上がりの形を決めるのはこの式で、
-   * 粗く取って間を埋めると壁が鈍って階段状の破片になる。
-   *
-   * field は「段化するかどうか」の場。標高でノイズをずらしてあるので、
-   * (x,z) だけで決めた場合のような「山麓から山頂まで一直線の弱点」ができない。
-   */
   private applyCliffBands(
     h: number,
     p: DifficultyProfile,
@@ -213,11 +252,8 @@ export class Heightfield {
     frac: number,
     bandOff: number,
   ): { h: number; cliff: number } {
-    // 段化するかどうかを閾値で決める。0/1 に寄せるので
-    // 「素の斜面」か「テラス+壁」かのどちらかになり、
-    // 中途半端な (歩けないが壁でもない) 斜面ができない。
     const alt = clamp01(h / p.peakHeight);
-    const threshold = p.cliffiness * (0.72 + alt * 0.42);
+    const threshold = p.cliffiness * (0.68 + alt * 0.45);
     const strength = smoothstep(-0.1, 0.1, threshold - field);
     if (strength <= 0.02) return { h, cliff: 0 };
 
@@ -225,7 +261,6 @@ export class Heightfield {
     const i = Math.floor(b);
     const f = b - i;
     const terraced = (i + smoothstep(0, frac, f)) * p.bandHeight;
-    // 壁の途中 (f < frac) ほど「崖らしさ」が高い
     const wallness = 1 - smoothstep(frac * 0.75, frac * 1.5, f);
     return { h: lerp(h, terraced, strength), cliff: strength * wallness };
   }
@@ -246,20 +281,60 @@ export class Heightfield {
     this.summit.y = best;
   }
 
-  /** 登山口。山体の外周でいちばん標高が低い (＝谷の出口) 方角を選ぶ */
+  private findSecondaryPeaks(): void {
+    this.secondaryPeaks.length = 0;
+    const main = this.skeleton.peaks[0];
+    const minSep = this.profile.radius * 0.12;
+    // 副峰は主峰の半分程度でも、鞍部を挟んだ別の目標として地図に載せる。
+    const minH = this.summit.y * 0.48;
+
+    for (let pi = 1; pi < this.skeleton.peaks.length; pi++) {
+      const sp = this.skeleton.peaks[pi];
+      let best = -Infinity;
+      let bx = sp.x;
+      let bz = sp.z;
+      const r = this.profile.radius * 0.14;
+      for (let dz = -r; dz <= r; dz += this.step * 2) {
+        for (let dx = -r; dx <= r; dx += this.step * 2) {
+          const x = sp.x + dx;
+          const z = sp.z + dz;
+          if (!this.inside(x, z)) continue;
+          const h = this.heightAt(x, z);
+          if (h > best) {
+            best = h;
+            bx = x;
+            bz = z;
+          }
+        }
+      }
+      if (best < minH) continue;
+      if (Math.hypot(bx - main.x, bz - main.z) < minSep) continue;
+      if (Math.hypot(bx - this.summit.x, bz - this.summit.z) < minSep) continue;
+      if (this.secondaryPeaks.some((p) => Math.hypot(p.x - bx, p.z - bz) < minSep)) continue;
+      this.secondaryPeaks.push({ x: bx, y: best, z: bz });
+    }
+  }
+
   private findTrailhead(): void {
-    const r = this.profile.radius * 0.98;
+    const r = this.profile.radius * 0.96;
+    const prefer = this.skeleton.approachAngle;
     let best = Infinity;
-    let bx = r;
-    let bz = 0;
-    for (let k = 0; k < 128; k++) {
-      const a = (k / 128) * Math.PI * 2;
-      const x = this.summit.x + Math.cos(a) * r;
-      const z = this.summit.z + Math.sin(a) * r;
-      if (Math.abs(x) > this.half - 20 || Math.abs(z) > this.half - 20) continue;
-      const h = this.heightAt(x, z) + this.slopeAt(x, z) * 40;
-      if (h < best) {
-        best = h;
+    let bx = Math.cos(prefer) * r;
+    let bz = Math.sin(prefer) * r;
+
+    for (let k = 0; k < 160; k++) {
+      const a = (k / 160) * Math.PI * 2;
+      const x = Math.cos(a) * r;
+      const z = Math.sin(a) * r;
+      if (Math.abs(x) > this.half - 30 || Math.abs(z) > this.half - 30) continue;
+      const h = this.heightAt(x, z);
+      const slope = this.slopeAt(x, z);
+      let angDiff = Math.abs(Math.atan2(Math.sin(a - prefer), Math.cos(a - prefer)));
+      if (angDiff > Math.PI) angDiff = Math.PI * 2 - angDiff;
+      const approachBias = angDiff / Math.PI;
+      const score = h + slope * 35 + approachBias * 18;
+      if (score < best) {
+        best = score;
         bx = x;
         bz = z;
       }
@@ -268,8 +343,6 @@ export class Heightfield {
     this.trailhead.z = bz;
     this.trailhead.y = this.heightAt(bx, bz);
   }
-
-  // --- 問い合わせ ---------------------------------------------------------
 
   inside(x: number, z: number): boolean {
     return Math.abs(x) < this.half - this.step && Math.abs(z) < this.half - this.step;
@@ -287,7 +360,6 @@ export class Heightfield {
     return this.cliffMask[jj * this.n + ii];
   }
 
-  /** バイリニア補間した標高 */
   heightAt(x: number, z: number): number {
     const fx = (x + this.half) / this.step;
     const fz = (z + this.half) / this.step;
@@ -316,7 +388,6 @@ export class Heightfield {
     );
   }
 
-  /** 勾配 (dh/dx, dh/dz) */
   gradientAt(x: number, z: number, out: { gx: number; gz: number } = { gx: 0, gz: 0 }) {
     const d = this.step;
     out.gx = (this.heightAt(x + d, z) - this.heightAt(x - d, z)) / (2 * d);
@@ -324,13 +395,11 @@ export class Heightfield {
     return out;
   }
 
-  /** 斜度 (ラジアン) */
   slopeAt(x: number, z: number): number {
     const g = this.gradientAt(x, z);
     return Math.atan(Math.hypot(g.gx, g.gz));
   }
 
-  /** 法線 (正規化済み) */
   normalAt(x: number, z: number, out: { x: number; y: number; z: number } = { x: 0, y: 1, z: 0 }) {
     const g = this.gradientAt(x, z);
     const len = Math.hypot(g.gx, 1, g.gz);
@@ -340,10 +409,9 @@ export class Heightfield {
     return out;
   }
 
-  /** 標高に対する相対的な高さ 0..1 (山頂で 1) */
   altitudeRatio(y: number): number {
     return clamp01(y / Math.max(1, this.summit.y));
   }
 }
 
-export { WORLD_SIZE, GRID_STEP };
+export { WORLD_SIZE, GRID_STEP, COARSE };
